@@ -1,0 +1,1558 @@
+---
+title: "Method Comparison"
+author: "Vivien Wiltzsch & Klaudia Adamowicz"
+date: "2024-03-18"
+output: 
+  html_document:
+    toc : true
+    toc_depth: 2
+    number_sections: true
+---
+
+## Setup 
+This section loads the necessary libraries for the analysis and sets some initial parameters such as color mapping and random seed for reproducibility.
+
+```{r setup, include=FALSE}
+#BiocManager::install("ComplexUpset")
+library_names <- c("readr", "ggplot2", "dplyr", "tidyr", "stringr", "data.table",
+                   "purrr", "forcats", "patchwork", "matrixStats", "gridExtra", "ComplexUpset")
+
+for (lib in library_names) {
+  library(lib, character.only = TRUE)
+}
+
+# set random number seed
+seed = 27
+set.seed(seed)
+
+
+# Define color mapping for Fractions
+fraction_colors <- c("AI" = "royalblue", "AS" = "palegreen3", "single" = "coral")
+
+```
+
+## Data Loading
+Here, the raw data files are loaded into R. This includes the main dataset and the metadata file, which will be used for subsequent analysis steps.
+
+```{r load_data}
+# Adjust path as necessary for your file locations
+dataset_unsorted <- fread("data/report.pg_matrix.tsv")[, ID := .I]
+meta_data <- fread("data/meta_data.csv")
+```
+
+## Data Preperation
+
+### Data Trimming
+The column names of the loaded dataset are cleaned up in this step. This involves removing specific prefixes and suffixes to standardize the column names, making them easier to work with.
+
+```{r prepare_data}
+# Clean up column names in dataset
+# Remove specific prefix and suffix from column names
+prefix <- "/mnt/ag_proteomik/shared_worktmp/20240126_CaGe_Knochenextraktion ohne Label_Thess/Knochenextrakte_"
+suffix <- "_Slot.*"
+
+names(dataset_unsorted) <- sub(suffix, "", sub(prefix, "", names(dataset_unsorted)))
+```
+
+### Data Sorting
+In this section, the metadata is prepared for sorting, and the main dataset's columns are reordered based on this sorted metadata. This ensures that the dataset columns follow a meaningful order, aligning with the metadata.
+
+```{r sort_data}
+# Prepare meta_data for sorting
+# Extract numerical part from 'Column' for sorting purposes
+meta_data[, M_value := as.numeric(sub("M", "", sub("-.*", "", Column)))]
+
+# Define custom order for Buffer_type and apply it
+buffer_order <- c("AS", "AI", "AS1", "AI1", "AI2", "AS2", "single")
+meta_data[, Buffer_name := factor(Buffer_name, levels = buffer_order)]
+
+# Sort meta_data based on multiple criteria
+ordered_meta_data <- meta_data[order(M_value, Repl_Techn, Repl_Biol, Buffer_name)]
+
+# Sort column names in dataset_unsorted
+descr_columns <- names(dataset_unsorted)[!names(dataset_unsorted) %in% ordered_meta_data$Column]
+new_order <- c(descr_columns, ordered_meta_data$Column)
+dataset_sorted <- dataset_unsorted[, ..new_order]
+```
+
+### Data Transformation and Merging
+The sorted dataset is transformed into a long format, which is more suitable for certain types of analysis. Following this, the dataset is merged with the metadata, enriching it with additional information necessary for analysis.
+
+```{r}
+# Melt dataset_sorted into a long format
+dataset_long <- melt(dataset_sorted, 
+                     id.vars = descr_columns, 
+                     variable.name = "Sample.ID", 
+                     value.name = "maxLfQ_intensities")
+
+# Merge dataset_long with meta_data
+dataset_merged <- merge(dataset_long, meta_data, by.x = "Sample.ID", by.y = "Column", all.x = TRUE)
+
+write_tsv(dataset_merged, "report.pg_matrix_long.tsv")
+```
+
+## Number of Quantified Proteins
+
+### Per Sample
+
+```{r}
+# Count the number of non-NA maxLfQ_intensities for each Sample.ID within each Method
+dataset_count <- dataset_merged[!is.na(maxLfQ_intensities), .(Protein_Count = .N), by = .(Method, Sample.ID, Buffer_type)]
+
+# Set the order of Sample.ID in dataset_count to match the order in ordered_meta_data$Column
+dataset_count$Sample.ID <- factor(dataset_count$Sample.ID, levels = ordered_meta_data$Column)
+
+# Create the barplot
+ggplot(dataset_count, aes(x = Sample.ID, y = Protein_Count, fill = Buffer_type)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  facet_wrap(~ Method, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Number of Quantified Proteins per Sample, by Method",
+       y = "Number of Quantified Proteins", x = "Sample ID", fill = "Buffer Type") +
+  scale_fill_manual(values = fraction_colors)
+```
+
+### Per Buffer_name
+
+```{r}
+dataset_filtered <- dataset_merged[Repl_Techn == 1 & !is.na(maxLfQ_intensities)]
+dataset_filtered_repl <- dataset_filtered[, .(Unique_Repl_Biol_Count = uniqueN(Repl_Biol)), by = .(Method, Buffer_name, Buffer_type, ID)]
+
+dataset_count <- dataset_filtered_repl[, .(Protein_Count = .N), by = .(Method, Buffer_name, Buffer_type)]
+
+# Create the barplot
+ggplot(dataset_count, aes(x = Buffer_name, y = Protein_Count, fill = Buffer_type)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  facet_wrap(~ Method, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Number of Quantified Proteins per Buffer, by Method",
+       y = "Number of Quantified Proteins", x = "Buffer Name", fill = "Buffer Type") +
+  scale_fill_manual(values = fraction_colors)
+```
+
+### In 3 of 4 Biological Replicates in Buffer
+
+```{r}
+dataset_filtered_in_3_of_4_repl <- dataset_filtered_repl[Unique_Repl_Biol_Count >= 3]
+
+combined_dataset_count <- rbind(
+  dataset_count[, Source := "Total"],
+  dataset_filtered_in_3_of_4_repl[, .(Protein_Count = .N, Source = "3 of 4 biol. Replicates"), by = .(Method, Buffer_name, Buffer_type)]
+)
+
+# Create the barplot
+ggplot(combined_dataset_count, aes(x = Buffer_name, y = Protein_Count, fill = Buffer_type, alpha = Source)) +
+  geom_bar(aes(group = Source), stat = "identity", position = position_dodge(width = 0.8)) +
+  geom_text(aes(label = Protein_Count, group = Source), 
+            position = position_dodge(width = 0.8), vjust = -0.3, size = 3) + 
+  facet_wrap(~ Method, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Number of Quantified Proteins per Buffer, by Method",
+       y = "Number of Quantified Proteins", x = "Buffer Name", fill = "Buffer Type") +
+  scale_fill_manual(values = fraction_colors) + 
+  scale_alpha_discrete(range = c(0.9, 0.5)) + ylim(0, 6000)
+```
+
+#### With error bar
+
+```{r}
+fraction_colors <- c("AI" = "royalblue", "AS" = "palegreen3", "single" = "coral")
+
+# Assuming 'dataset_filtered_repl' and 'dataset_count' are the correct datasets
+dataset_filtered_in_3_of_4_repl <- dataset_filtered_repl[Unique_Repl_Biol_Count >= 3]
+
+combined_dataset_count7 <- rbind(
+  dataset_filtered_repl[, .(Protein_Count = .N), by = .(Method, Buffer_name, Buffer_type)][, Source := "Total"],
+  dataset_filtered_in_3_of_4_repl[, .(Protein_Count = .N, Source = "3 of 4 biol. Replicates"), by = .(Method, Buffer_name, Buffer_type)]
+)
+
+# Merge the data to get the "Total" counts for each combination
+total_counts <- combined_dataset_count7[Source == "Total", .(Buffer_name, Method, Total_Protein_Count = Protein_Count)]
+combined_dataset_count7 <- merge(combined_dataset_count7[Source == "3 of 4 biol. Replicates"], total_counts, by = c("Buffer_name", "Method"), all.x = TRUE)
+
+combined_dataset_count7 <- combined_dataset_count7[order(Method, Buffer_name, Buffer_type)]
+
+# Create the barplot
+ggplot(combined_dataset_count7, aes(x = Method, y = Protein_Count, fill = Buffer_type)) +
+  geom_bar(aes(group = interaction(Buffer_name, Method)), stat = "identity", width = 0.8,  position = position_dodge2(width = 0.9, preserve = "single"), alpha = 0.9) +
+  #geom_errorbar(aes(ymin = Protein_Count, ymax = Total_Protein_Count), 
+  #              position = position_dodge(width = 0.8), width = 0.25, color = "black", alpha = 0.5) +
+  geom_text(aes(label = Protein_Count, group = interaction(Buffer_name, Method)), 
+            position = position_dodge2(width = 0.9, preserve = "single"), vjust = -0.5, hjust = 0.5, size = 3) + 
+  #facet_wrap(~ Method, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Number of Quantified Proteins per Buffer, by Method",
+       y = "Number of Quantified Proteins", x = "Buffer Name", fill = "Buffer Type") +
+  scale_fill_manual(values = fraction_colors) + 
+  ylim(0, 6000)
+
+```
+
+
+### In 3 of 4 Biological Replicates in Buffer with total unique
+
+```{r}
+fraction_colors <- c("AI" = "royalblue", "AS" = "palegreen3", "single" = "coral", "Summary" = "tan")
+
+# Calculate the sum of unique proteins for each method
+sum_unique_proteins <- dataset_filtered_in_3_of_4_repl[, .(Protein_Count = uniqueN(ID)), by = Method]
+
+sum_unique_proteins[, Buffer_name := "All Buffers"]
+sum_unique_proteins[, Buffer_type := "Summary"]  # This assumes Buffer_type can be a category like "Summary"
+sum_unique_proteins[, Source := "3 of 4 biol. Replicates"]
+
+# Calculate the sum of unique proteins for each method
+sum_unique_proteins2 <- dataset_filtered_repl[, .(Protein_Count = uniqueN(ID)), by = Method]
+
+sum_unique_proteins2[, Buffer_name := "All Buffers"]
+sum_unique_proteins2[, Buffer_type := "Summary"]  # This assumes Buffer_type can be a category like "Summary"
+sum_unique_proteins2[, Source := "Total"]
+
+# Now bind this new data frame to the original 'combined_dataset_count'
+combined_dataset_count2 <- rbind(combined_dataset_count, sum_unique_proteins, sum_unique_proteins2, fill = TRUE)
+
+# Create the barplot with an added summary bar for total unique proteins
+ggplot(combined_dataset_count2, aes(x = Buffer_name, y = Protein_Count, fill = Buffer_type, alpha = Source)) +
+  geom_bar(aes(group = Source), stat = "identity", position = position_dodge(width = 0.8)) +
+  geom_text(aes(label = Protein_Count, group = Source), 
+            position = position_dodge(width = 0.8), vjust = -0.3, size = 3) + 
+  facet_wrap(~ Method, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Number of Quantified Proteins per Buffer, by Method",
+       y = "Number of Quantified Proteins", x = "Buffer Name", fill = "Buffer Type") +
+  scale_fill_manual(values = fraction_colors) + 
+  scale_alpha_discrete(range = c(0.9, 0.5)) + ylim(0, 6000)
+```
+
+```{r}
+fraction_colors <- c("AI" = "royalblue", "AS" = "palegreen3", "single" = "coral", "Summary" = "tan")
+
+# Calculate the sum of unique proteins for each method
+sum_unique_proteins <- dataset_filtered_in_3_of_4_repl[, .(Protein_Count = uniqueN(ID)), by = Method]
+
+sum_unique_proteins[, Buffer_name := "All Buffers"]
+sum_unique_proteins[, Buffer_type := "Summary"]  # This assumes Buffer_type can be a category like "Summary"
+sum_unique_proteins[, Source := "3 of 4 biol. Replicates"]
+
+# Calculate the sum of unique proteins for each method
+sum_unique_proteins2 <- dataset_filtered_repl[, .(Protein_Count = uniqueN(ID)), by = Method]
+
+sum_unique_proteins2[, Buffer_name := "All Buffers"]
+sum_unique_proteins2[, Buffer_type := "Summary"]  # This assumes Buffer_type can be a category like "Summary"
+sum_unique_proteins2[, Source := "Total"]
+
+# Now bind this new data frame to the original 'combined_dataset_count'
+combined_dataset_count2 <- rbind(combined_dataset_count, sum_unique_proteins, sum_unique_proteins2, fill = TRUE)
+
+# Create the barplot
+ggplot(combined_dataset_count2[combined_dataset_count2$Source != "Total"], aes(x = Method, y = Protein_Count, fill = Buffer_type)) +
+  geom_bar(aes(group = interaction(Buffer_name, Method)), stat = "identity", width = 0.8,  position = position_dodge2(width = 0.9, preserve = "single"), alpha = 0.9) +
+  #geom_errorbar(aes(ymin = Protein_Count, ymax = Total_Protein_Count), 
+  #              position = position_dodge(width = 0.8), width = 0.25, color = "black", alpha = 0.5) +
+  geom_text(aes(label = Protein_Count, group = interaction(Buffer_name, Method)), 
+            position = position_dodge2(width = 0.9, preserve = "single"), vjust = -0.5, hjust = 0.5, size = 3) + 
+  facet_wrap(~ Source, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Number of Quantified Proteins per Buffer, by Method",
+       y = "Number of Quantified Proteins", x = "Buffer Name", fill = "Buffer Type") +
+  scale_fill_manual(values = fraction_colors) + 
+  ylim(0, 6000)
+```
+
+
+### Per Method 
+
+```{r}
+combined_dataset_count <- rbind(
+  dataset_filtered_repl[, .(Protein_Count = uniqueN(ID), Source = "Total"), by = Method],
+  dataset_filtered_in_3_of_4_repl[, .(Protein_Count = uniqueN(ID), Source = "3 of 4 biol. Replicates"), by = Method]
+)
+
+ggplot(combined_dataset_count, aes(x = Method, y = Protein_Count, fill = Source)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(aes(label = Protein_Count), vjust = -0.3, position = position_dodge(width = 0.9), size = 3) +
+  labs(title = "Protein Counts per Method (Technical Replicate 1)", 
+       y = "No. of quantified proteins", 
+       x = "Method", 
+       fill = "Quantified Proteins") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(breaks = seq(0, 6000, by = 1000), limits = c(0, 6000)) +
+  scale_fill_manual(values = c("Total" = "#4D8DB4", "3 of 4 biol. Replicates" = "#005B7F"),
+                    labels = c("3 of 4 biol. Replicates", "Total"))
+
+```
+
+## Gained IDs
+
+```{r}
+dataset_filered_in_3_of_4 <- merge(
+  dataset_filtered, 
+  dataset_filtered_in_3_of_4_repl[, .(Method, Buffer_name, ID)], 
+  by = c("Method", "Buffer_name", "ID")
+)
+```
+
+### Gain per Buffer
+
+```{r}
+# Define the order of buffers for each method
+buffer_order <- list(
+  `4step` = c("AS1", "AI1", "AI2", "AS2"),
+  `2step+` = c("AS", "AI"),
+  `2step` = c("AS", "AI"),
+  `1step+` = c("single"),
+  `1step` = c("single")
+)
+
+# Step 1: Group by Method and Buffer, count unique IDs
+method_buffer_ids <- dataset_filered_in_3_of_4 %>%
+  group_by(Method, Buffer_name) %>%
+  summarise(IDs = list(unique(ID)), .groups = 'drop')
+
+# Step 2: Calculate new IDs added for each buffer in order
+new_ids_by_method <- lapply(names(buffer_order), function(method) {
+  # Subset data for the method
+  subset_data <- method_buffer_ids %>%
+    filter(Method == method) %>%
+    arrange(match(Buffer_name, buffer_order[[method]]))  # Arrange by the specified buffer order
+
+  # Compute cumulative union of IDs and new IDs at each step
+  cumulative_ids <- list()
+  new_ids_count <- c()
+  
+  for (i in seq_along(subset_data$Buffer_name)) {
+    current_ids <- subset_data$IDs[[i]]
+    if (i == 1) {
+      cumulative_ids[[i]] <- unique(current_ids)
+      new_ids_count[i] <- length(current_ids)
+    } else {
+      cumulative_ids[[i]] <- unique(union(cumulative_ids[[i - 1]], current_ids))
+      new_ids_count[i] <- length(cumulative_ids[[i]]) - length(cumulative_ids[[i - 1]])
+    }
+  }
+  
+  data.frame(
+    Buffer_name = subset_data$Buffer_name,
+    CumulativeIDCount = sapply(cumulative_ids, length),
+    NewIDsAdded = new_ids_count
+  )
+})
+new_ids_by_method <- setNames(new_ids_by_method, names(buffer_order))
+```
+
+```{r}
+# Combine all data frames into one, adding a 'Method' column to each
+combined_data <- bind_rows(lapply(names(new_ids_by_method), function(method) {
+  df <- new_ids_by_method[[method]]
+  df$Method <- method
+  df
+}), .id = NULL)
+
+# Ensure Buffer is factored correctly according to buffer_orders
+combined_data <- combined_data %>%
+  mutate(Buffer = as.character(Buffer_name)) %>%  # Ensure Buffer is character to reset factor levels
+  group_by(Method) %>%
+  mutate(Buffer = factor(Buffer, levels = buffer_order[[unique(Method)]]))
+
+
+combined_data$BufferType <- ifelse(grepl("AI", combined_data$Buffer), "AI",
+                                   ifelse(grepl("AS", combined_data$Buffer), "AS", "single"))
+
+combined_data <- combined_data %>%
+  mutate(Buffer = factor(Buffer, levels = rev(levels(Buffer))))
+
+# Define colors for the general buffer types for the legend
+general_colors <- c("AI" = "royalblue", "AS" = "palegreen3", "single" = "coral")
+
+# Create the stacked bar plot with the correct buffer order
+ggplot(combined_data, aes(x = Method, y = NewIDsAdded, fill = Buffer)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = fraction_colors, 
+                    breaks = c("AI", "AS", "single"),
+                    labels = c("AI" = "AI", "AS" = "AS", "single" = "single")) +
+  geom_text(aes(label = NewIDsAdded), position = position_stack(vjust = 0.5), size = 3) +
+  labs(title = "New IDs Added per Method and Buffer Type", x = "Method", y = "New IDs Added") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = guide_legend(title = "Buffer Type", override.aes = list(fill = general_colors)))
+
+
+```
+
+### Step 2 and Step 2 +
+
+#### Venn
+
+```{r}
+# Install and load VennDiagram package if not already installed
+if (!require("VennDiagram")) {
+  install.packages("VennDiagram")
+}
+library(VennDiagram)
+
+
+# Determine unique and shared IDs
+buffer_groups <- dataset_filered_in_3_of_4[dataset_filered_in_3_of_4$Method=="2step"][, .N, by = .(ID, Buffer_name)]
+unique_ids <- buffer_groups[, .(unique_count = .N), by = .(ID)][unique_count == 1, .(ID)]
+shared_ids <- buffer_groups[, .(shared_count = .N), by = .(ID)][shared_count > 1, .(ID)]
+
+# Extract unique IDs per Buffer_name
+unique_as_ids <- buffer_groups[Buffer_name == "AS" & ID %in% unique_ids$ID, ID]
+unique_ai_ids <- buffer_groups[Buffer_name == "AI" & ID %in% unique_ids$ID, ID]
+
+# Extract shared IDs
+shared_ids <- shared_ids$ID
+
+# Create a Venn diagram
+venn.plot <- venn.diagram(
+  x = list(
+    AS = unique_as_ids,
+    AI = unique_ai_ids,
+    Shared = shared_ids
+  ),
+  category.names = c("AS", "AI", "Shared"),
+  filename = NULL,
+  fill = c("#56B4E9", "#D55E00", "#0072B2"),
+  alpha = 0.5,
+  cex = 2,
+  cat.cex = 2,
+  cat.pos = c(-20, 20, 180),
+  cat.dist = 0.05,
+  cat.col = c("#56B4E9", "#D55E00", "#0072B2"),
+  margin = 0.1
+)
+
+# Draw the Venn diagram
+grid.newpage()
+grid.draw(venn.plot)
+
+# Add a title to the Venn diagram
+grid.text("Comparison of AS and AI Buffers in 2step Method", x = 0.5, y = 0.95, gp = gpar(fontsize = 16, fontface = "bold"))
+```
+
+```{r}
+library(openxlsx)
+# Define columns to extract
+columns_to_extract <- c("Protein.Group", "Protein.Ids", "Protein.Names", "Genes", "First.Protein.Description", "ID")
+
+# Create data frames for each set of IDs
+unique_as_df <- dataset_sorted[ID %in% unique_as_ids, ..columns_to_extract]
+unique_ai_df <- dataset_sorted[ID %in% unique_ai_ids, ..columns_to_extract]
+shared_df <- dataset_sorted[ID %in% shared_ids, ..columns_to_extract]
+
+# Save the data frames to separate sheets in an Excel file
+write.xlsx(list("Unique_AS" = unique_as_df, "Unique_AI" = unique_ai_df, "Shared" = shared_df), file = "2step_IDs.xlsx")
+```
+
+
+
+```{r}
+# Determine unique and shared IDs
+buffer_groups <- dataset_filered_in_3_of_4[dataset_filered_in_3_of_4$Method=="2step+"][, .N, by = .(ID, Buffer_name)]
+unique_ids <- buffer_groups[, .(unique_count = .N), by = .(ID)][unique_count == 1, .(ID)]
+shared_ids <- buffer_groups[, .(shared_count = .N), by = .(ID)][shared_count > 1, .(ID)]
+
+# Extract unique IDs per Buffer_name
+unique_as_ids <- buffer_groups[Buffer_name == "AS" & ID %in% unique_ids$ID, ID]
+unique_ai_ids <- buffer_groups[Buffer_name == "AI" & ID %in% unique_ids$ID, ID]
+
+# Extract shared IDs
+shared_ids <- shared_ids$ID
+
+# Create a Venn diagram
+venn.plot <- venn.diagram(
+  x = list(
+    AS = unique_as_ids,
+    AI = unique_ai_ids,
+    Shared = shared_ids
+  ),
+  category.names = c("AS", "AI", "Shared"),
+  filename = NULL,
+  fill = c("#56B4E9", "#D55E00", "#0072B2"),
+  alpha = 0.5,
+  cex = 2,
+  cat.cex = 2,
+  cat.pos = c(-20, 20, 180),
+  cat.dist = 0.05,
+  cat.col = c("#56B4E9", "#D55E00", "#0072B2"),
+  margin = 0.1
+)
+
+# Draw the Venn diagram
+grid.newpage()
+grid.draw(venn.plot)
+
+# Add a title to the Venn diagram
+grid.text("Comparison of AS and AI Buffers in 2step+ Method", x = 0.5, y = 0.95, gp = gpar(fontsize = 16, fontface = "bold"))
+```
+
+```{r}
+library(openxlsx)
+# Define columns to extract
+columns_to_extract <- c("Protein.Group", "Protein.Ids", "Protein.Names", "Genes", "First.Protein.Description", "ID")
+
+# Create data frames for each set of IDs
+unique_as_df <- dataset_sorted[ID %in% unique_as_ids, ..columns_to_extract]
+unique_ai_df <- dataset_sorted[ID %in% unique_ai_ids, ..columns_to_extract]
+shared_df <- dataset_sorted[ID %in% shared_ids, ..columns_to_extract]
+
+# Save the data frames to separate sheets in an Excel file
+write.xlsx(list("Unique_AS" = unique_as_df, "Unique_AI" = unique_ai_df, "Shared" = shared_df), file = "2step+_IDs.xlsx")
+```
+
+#### 4 way Venn
+
+```{r}
+# Assuming 'dataset_filtered_in_3_of_4' is the correct dataset
+buffer_groups <- dataset_filtered_in_3_of_4_repl[, .N, by = .(ID, Buffer_name, Method)]
+
+# Extract unique IDs for each buffer and method combination
+unique_ids_2step_as <- buffer_groups[Buffer_name == "AS" & Method == "2step", .(ID)]
+unique_ids_2step_ai <- buffer_groups[Buffer_name == "AI" & Method == "2step", .(ID)]
+unique_ids_2step_plus_as <- buffer_groups[Buffer_name == "AS" & Method == "2step+", .(ID)]
+unique_ids_2step_plus_ai <- buffer_groups[Buffer_name == "AI" & Method == "2step+", .(ID)]
+
+# Since we want to display them in a Venn diagram, we need to compute intersections appropriately
+# For four sets, we can use the VennDiagram package but custom computation for intersections will be needed for accuracy
+
+# Define each set
+set1 <- unique(unique_ids_2step_as$ID)
+set2 <- unique(unique_ids_2step_ai$ID)
+set3 <- unique(unique_ids_2step_plus_as$ID)
+set4 <- unique(unique_ids_2step_plus_ai$ID)
+```
+
+```{r}
+# Create a Venn diagram with four groups
+venn.plot <- venn.diagram(
+  x = list(
+    "2step AS" = set1,
+    "2step AI" = set2,
+    "2step+ AS" = set3,
+    "2step+ AI" = set4
+  ),
+  category.names = c("2step AS", "2step AI", "2step+ AS", "2step+ AI"),
+  filename = NULL,
+  fill = c("palegreen3", "royalblue", "palegreen3", "royalblue"),
+  alpha = 0.5,
+  cex = 2,
+  cat.cex = 2,
+  cat.pos = c(-30, 30, -30, 30),
+  cat.dist = 0.15,
+  cat.col =  c("palegreen3", "royalblue", "palegreen3", "royalblue"),
+  margin = 0.1
+)
+
+# Draw the Venn diagram
+grid.newpage()
+grid.draw(venn.plot)
+
+# Add a title to the Venn diagram
+grid.text("Comparison of AS and AI Buffers Across 2step and 2step+ Methods", x = 0.5, y = 0.95, gp = gpar(fontsize = 16, fontface = "bold"))
+
+```
+
+```{r}
+# Load necessary libraries
+library(data.table)
+library(UpSetR)
+
+# Assuming 'dataset_filtered_in_3_of_4_repl' is the correct dataset
+buffer_groups <- dataset_filtered_in_3_of_4_repl[, .N, by = .(ID, Buffer_name, Method)]
+
+# Extract unique IDs for each buffer and method combination
+unique_ids_2step_as <- buffer_groups[Buffer_name == "AS" & Method == "2step", .(ID)]
+unique_ids_2step_ai <- buffer_groups[Buffer_name == "AI" & Method == "2step", .(ID)]
+unique_ids_2step_plus_as <- buffer_groups[Buffer_name == "AS" & Method == "2step+", .(ID)]
+unique_ids_2step_plus_ai <- buffer_groups[Buffer_name == "AI" & Method == "2step+", .(ID)]
+
+# Define each set
+set1 <- unique(unique_ids_2step_as$ID)
+set2 <- unique(unique_ids_2step_ai$ID)
+set3 <- unique(unique_ids_2step_plus_as$ID)
+set4 <- unique(unique_ids_2step_plus_ai$ID)
+
+# Create a data frame to represent the presence/absence of each ID in the sets
+all_ids <- unique(c(set1, set2, set3, set4))
+upset_data <- data.frame(
+  ID = all_ids,
+  `2step AS` = all_ids %in% set1,
+  `2step AI` = all_ids %in% set2,
+  `2step+ AS` = all_ids %in% set3,
+  `2step+ AI` = all_ids %in% set4
+)
+
+# Convert logicals to integers for UpSetR
+upset_data[, -1] <- lapply(upset_data[, -1], as.integer)
+names(upset_data) <- c("ID", "2step AS", "2step AI", "2step+ AS", "2step+ AI")
+
+# Create the UpSet plot
+upset(
+  upset_data,
+  sets = c("2step AS", "2step AI", "2step+ AS", "2step+ AI"),
+  keep.order = TRUE,
+  order.by = "freq",
+  main.bar.color = "black",
+  sets.bar.color =  c("palegreen3", "royalblue", "palegreen3", "royalblue"),
+  text.scale = 1.5,
+  mainbar.y.label = "Intersection Size",
+  sets.x.label = "Set Size"
+)
+
+# Add a title to the UpSet plot
+grid.text("Comparison of AS and AI Buffers Across 2step and 2step+ Methods", x = 0.5, y = 0.97, gp = gpar(fontsize = 14, fontface = "bold"))
+```
+
+
+```{r}
+# Create Venn diagram for "2step"
+venn.plot.2step <- venn.diagram(
+  x = list(
+    AS = unique(unique_ids_2step_as$ID),
+    AI = unique(unique_ids_2step_ai$ID)
+  ),
+  category.names = c("AS", "AI"),
+  filename = NULL,
+  fill = c("palegreen3", "royalblue"),
+  alpha = 0.5,
+  cex = 2,
+  cat.cex = 2,
+  cat.pos = c(180, 0),
+  cat.dist = 0.05,
+  cat.col = c("palegreen3", "royalblue"),
+  margin = 0.1
+)
+
+# Draw the Venn diagram for "2step"
+grid.newpage()
+grid.draw(venn.plot.2step)
+grid.text("Intersection of AS and AI in 2step Method", x = 0.5, y = 0.95, gp = gpar(fontsize = 16, fontface = "bold"))
+
+```
+
+```{r}
+venn.plot.2step.plus <- venn.diagram(
+  x = list(
+    AS = unique(unique_ids_2step_plus_as$ID),
+    AI = unique(unique_ids_2step_plus_ai$ID)
+  ),
+  category.names = c("AS", "AI"),
+  filename = NULL,
+  fill = c("palegreen3", "royalblue"),
+  alpha = 0.5,
+  cex = 2,
+  cat.cex = 2,
+  cat.pos = c(180, 0),
+  cat.dist = 0.05,
+  cat.col = c("palegreen3", "royalblue"),
+  margin = 0.1
+)
+
+# Draw the Venn diagram for "2step+"
+grid.newpage()
+grid.draw(venn.plot.2step.plus)
+grid.text("Intersection of AS and AI in 2step+ Method", x = 0.5, y = 0.95, gp = gpar(fontsize = 16, fontface = "bold"))
+
+```
+
+
+## Statistics
+
+```{r}
+df <- dataset_filered_in_3_of_4
+
+# Calculate the max LFQ intensities for each sample type with 4 biological replicates
+#max_lfq_df <- df %>%
+#  group_by(ID, Protein.Group, Genes, Method, Buffer_name) %>%
+#  summarize(MaxLFQ = max(maxLfQ_intensities, na.rm = TRUE)) %>%
+#  ungroup()
+
+# Calculate the statistics for each sample type
+stats_df <- df %>%
+  group_by(ID, Protein.Group, Genes, Protein.Names, Method, Buffer_name) %>%
+  summarize(
+    MedianLFQ = median(maxLfQ_intensities, na.rm = TRUE),
+    MeanLFQ = mean(maxLfQ_intensities, na.rm = TRUE),
+    SDLFQ = sd(maxLfQ_intensities, na.rm = TRUE),
+    CVLFQ = (sd(maxLfQ_intensities, na.rm = TRUE) / mean(maxLfQ_intensities, na.rm = TRUE)) * 100,
+    .groups = 'drop'
+  ) %>%
+  filter(!is.na(MeanLFQ))  # Remove rows where mean LFQ is NA
+
+# Combine the max LFQ intensities and statistics
+#combined_df <- max_lfq_df %>%
+#  left_join(stats_df, by = c("ID", "Protein.Group", "Genes", "Method", "Buffer_name")) %>%
+#  arrange(Protein.Group, Genes, Method, Buffer_name)
+combined_df <- stats_df %>% arrange(Protein.Group, Genes, Method, Buffer_name)
+```
+
+
+```{r}
+# Prepend "M" to the existing M_value
+meta_data <- meta_data %>%
+  mutate(M = paste0("M", M_value))
+```
+
+```{r}
+# Calculate the intensities for each biological replicate
+replicate_intensities <- dataset_filtered %>%
+  group_by(ID, Protein.Group, Genes, Protein.Names, M_value, Buffer_name, Repl_Biol) %>%
+  summarize(Intensity = mean(maxLfQ_intensities, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(M = paste0("M", M_value))
+
+# Pivot the replicate intensities
+replicate_intensities <- replicate_intensities %>%
+  mutate(B = paste0("B", Repl_Biol)) %>%
+  unite("M_B_Repl", M, Buffer_name, B, sep = "-") %>%
+  select(-Repl_Biol, -M_value) %>%
+  pivot_wider(names_from = M_B_Repl, values_from = Intensity)
+```
+
+
+```{r}
+# Step 1: Create a mapping for Method to the corresponding M value
+method_mapping <- unique(meta_data[, .(Method, M)])
+
+# Step 2: Add a new column M-B to combined_df using the mapping
+combined_df_long <- combined_df %>%
+  left_join(method_mapping, by = "Method") %>%
+  mutate(M_B = paste0(M, "-", Buffer_name))
+
+# combined_df_long 3: Remove the columns Method, Buffer_name
+combined_df_long <- combined_df_long %>%
+  select(-Method, -Buffer_name)
+
+# Step 4: Reshape the data to create new columns for each M-B combination
+combined_df_long <- combined_df_long %>%
+  pivot_longer(cols = c(MedianLFQ, MeanLFQ, SDLFQ, CVLFQ), names_to = "Metric", values_to = "Value") %>%
+  unite("M_B_Metric", M_B, Metric, sep = "_") %>%
+  select(-M) %>%
+  pivot_wider(names_from = M_B_Metric, values_from = Value)
+
+# Step 5: Group by ID, Protein.Group, and Genes
+#final_df <- combined_df_long %>%
+#  group_by(ID, Protein.Group, Genes, Protein.Names, M) %>%
+#  summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>%
+#  ungroup() %>%
+#  select(-M)
+
+final_df <- combined_df_long %>%
+  left_join(replicate_intensities, by = c("ID", "Protein.Group", "Genes", "Protein.Names"))
+
+final_df <- final_df %>%
+  select(
+    ID, Protein.Group, Genes, Protein.Names,
+    `M3-single-B1`, `M3-single-B2`, `M3-single-B3`, `M3-single-B4`, `M3-single_MedianLFQ`, `M3-single_MeanLFQ`, `M3-single_SDLFQ`, `M3-single_CVLFQ`,
+    `M4-single-B1`, `M4-single-B2`, `M4-single-B3`, `M4-single-B4`, `M4-single_MedianLFQ`, `M4-single_MeanLFQ`, `M4-single_SDLFQ`, `M4-single_CVLFQ`,
+    `M2-AS-B1`, `M2-AS-B2`, `M2-AS-B3`, `M2-AS-B4`, `M2-AS_MedianLFQ`, `M2-AS_MeanLFQ`, `M2-AS_SDLFQ`, `M2-AS_CVLFQ`,
+    `M2-AI-B1`, `M2-AI-B2`, `M2-AI-B3`, `M2-AI-B4`, `M2-AI_MedianLFQ`, `M2-AI_MeanLFQ`, `M2-AI_SDLFQ`, `M2-AI_CVLFQ`,
+    `M1-AS-B1`, `M1-AS-B2`, `M1-AS-B3`, `M1-AS-B4`, `M1-AS_MedianLFQ`, `M1-AS_MeanLFQ`, `M1-AS_SDLFQ`, `M1-AS_CVLFQ`,
+    `M1-AI-B1`, `M1-AI-B2`, `M1-AI-B3`, `M1-AI-B4`, `M1-AI_MedianLFQ`, `M1-AI_MeanLFQ`, `M1-AI_SDLFQ`, `M1-AI_CVLFQ`,
+    `M5-AS1-B1`, `M5-AS1-B2`, `M5-AS1-B3`, `M5-AS1-B4`, `M5-AS1_MedianLFQ`, `M5-AS1_MeanLFQ`, `M5-AS1_SDLFQ`, `M5-AS1_CVLFQ`,
+    `M5-AI1-B1`, `M5-AI1-B2`, `M5-AI1-B3`, `M5-AI1-B4`, `M5-AI1_MedianLFQ`, `M5-AI1_MeanLFQ`, `M5-AI1_SDLFQ`, `M5-AI1_CVLFQ`,
+    `M5-AI2-B1`, `M5-AI2-B2`, `M5-AI2-B3`, `M5-AI2-B4`, `M5-AI2_MedianLFQ`, `M5-AI2_MeanLFQ`, `M5-AI2_SDLFQ`, `M5-AI2_CVLFQ`,
+    `M5-AS2-B1`, `M5-AS2-B2`, `M5-AS2-B3`, `M5-AS2-B4`, `M5-AS2_MedianLFQ`, `M5-AS2_MeanLFQ`, `M5-AS2_SDLFQ`, `M5-AS2_CVLFQ`
+  )
+
+write.csv(final_df, "statistics_df.csv", row.names = FALSE)
+```
+
+#### Scatter
+
+```{r}
+# Function to create scatterplot with correlation
+create_scatterplot_with_correlation <- function(df, method_label, log_scale = FALSE) {
+  # Step 1: Filter the dataset for the specified method
+  filtered_df <- df %>%
+    filter(Method == method_label)
+
+  # Step 2: Identify shared IDs
+  shared_ids <- filtered_df %>%
+    group_by(ID) %>%
+    filter(n_distinct(Buffer_name) > 1) %>%
+    pull(ID) %>%
+    unique()
+
+  # Step 3: Subset the data for shared IDs
+  shared_data <- filtered_df %>%
+    filter(ID %in% shared_ids)
+
+  # Step 4: Reshape the data to have one row per ID with columns for each buffer
+  shared_data_wide <- shared_data %>%
+    select(-MedianLFQ, -SDLFQ, -CVLFQ) %>%
+    pivot_wider(names_from = Buffer_name, values_from = MeanLFQ, names_prefix = "MeanLFQ_")
+  
+  # Step 5: Apply log scale if flag is set
+  if (log_scale) {
+    shared_data_wide <- shared_data_wide %>%
+      mutate(across(starts_with("MeanLFQ_"), log2))
+  }
+
+  # Step 6: Calculate the correlation
+  correlation <- cor(shared_data_wide$MeanLFQ_AS, shared_data_wide$MeanLFQ_AI, use = "complete.obs")
+
+  # Step 7: Create the scatterplot
+  p <- ggplot(shared_data_wide, aes(x = MeanLFQ_AS, y = MeanLFQ_AI)) +
+    geom_point(color = "#0072B2") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+    labs(title = paste("Scatterplot of Shared IDs between AS and AI Buffers in", method_label, "Method"),
+         x = if (log_scale) "Log2 MeanLFQ Intensity in AS Buffer" else "MeanLFQ Intensity in AS Buffer",
+         y = if (log_scale) "Log2 MeanLFQ Intensity in AI Buffer" else "MeanLFQ Intensity in AI Buffer") +
+    theme_minimal() +
+    coord_equal() +
+    annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(correlation, 2)), 
+             hjust = 1.1, vjust = 2, size = 5, color = "black")
+  
+  print(p)
+}
+
+# Create scatterplots for "2step" and "2step+"
+create_scatterplot_with_correlation(combined_df, "2step")
+create_scatterplot_with_correlation(combined_df, "2step+")
+```
+
+```{r}
+# Create scatterplots for "2step" and "2step+"
+create_scatterplot_with_correlation(combined_df, "2step", log_scale = T)
+create_scatterplot_with_correlation(combined_df, "2step+", log_scale = T)
+```
+
+
+#### CV
+
+```{r}
+df <- combined_df
+
+# Create BufferType based on Buffer_name
+df$BufferType <- ifelse(grepl("AI", df$Buffer_name), "AI",
+                        ifelse(grepl("AS", df$Buffer_name), "AS", "single"))
+
+# Create a combined column for Method and Buffer_name to use as x-axis labels
+df <- df %>%
+  mutate(Method_Buffer = paste(Method, Buffer_name, sep = " - "))
+
+# Define the desired order of levels for Method_Buffer
+levels_order <- c("1step - single", "1step+ - single", "2step - AS", "2step - AI", 
+                  "2step+ - AS", "2step+ - AI", "4step - AS1", "4step - AI1", 
+                  "4step - AI2", "4step - AS2")
+
+# Set the levels of Method_Buffer
+df <- df %>%
+  mutate(Method_Buffer = factor(Method_Buffer, levels = levels_order))
+
+# Define colors for the general buffer types for the legend
+general_colors <- c("AI" = "royalblue", "AS" = "palegreen3", "single" = "coral")
+
+# Determine positions for vertical lines to separate the methods
+method_positions <- df %>%
+  group_by(Method) %>%
+  summarize(position = min(as.numeric(Method_Buffer)) - 0.5) %>%
+  filter(position > 0)
+
+# Create the violin plot with overlaid boxplot and vertical lines
+ggplot(df, aes(x = Method_Buffer, y = CVLFQ, fill = BufferType)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +  # Add boxplot
+  geom_vline(data = method_positions, aes(xintercept = position), linetype = "dotted", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of CVLFQ by Buffer Name and Method",
+       x = "Method - Buffer Name",
+       y = "CVLFQ") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = general_colors)
+
+```
+
+
+```{r}
+library(patchwork)
+
+df <- combined_df
+
+# Create BufferType based on Buffer_name
+df$BufferType <- ifelse(grepl("AI", df$Buffer_name), "AI",
+                        ifelse(grepl("AS", df$Buffer_name), "AS", "single"))
+
+# Create a combined column for Method and Buffer_name to use as x-axis labels
+df <- df %>%
+  mutate(Method_Buffer = paste(Method, Buffer_name, sep = " - "))
+
+# Define the desired order of levels for Method_Buffer
+levels_order <- c("1step - single", "1step+ - single", "2step - AI", "2step - AS", 
+                  "2step+ - AI", "2step+ - AS", "4step - AS1", "4step - AI1", 
+                  "4step - AI2", "4step - AS2")
+
+# Set the levels of Method_Buffer
+df <- df %>%
+  mutate(Method_Buffer = factor(Method_Buffer, levels = levels_order))
+
+# Define colors for the general buffer types for the legend
+general_colors <- c("AI" = "royalblue", "AS" = "palegreen3", "single" = "coral")
+
+# Determine positions for vertical lines to separate the methods
+method_positions <- df %>%
+  group_by(Method) %>%
+  summarize(position = min(as.numeric(factor(Method_Buffer))) - 0.5) %>%
+  filter(position > 0)
+
+# Reshape the data to long format for plotting multiple metrics
+df_long <- df %>%
+  pivot_longer(cols = c(CVLFQ, MedianLFQ, MeanLFQ, SDLFQ), 
+               names_to = "Metric", values_to = "Value")
+
+# Create a function to generate the plots
+create_plot <- function(data, metric, log_transform = FALSE, show_x_labels = TRUE) {
+  p <- ggplot(data, aes(x = Method_Buffer, y = Value, fill = BufferType)) +
+    geom_violin(trim = FALSE) +
+    geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +  # Add boxplot
+    geom_vline(data = method_positions, aes(xintercept = position), linetype = "dotted", color = "black") +
+    theme_minimal() +
+    labs(x = "Method - Buffer Name", y = metric) +
+    scale_fill_manual(values = general_colors)
+  
+  if (log_transform) {
+    p <- p + scale_y_log10()
+  }
+  
+  if (!show_x_labels) {
+    p <- p + theme(axis.text.x = element_blank(), axis.title.x = element_blank())
+  } else {
+    p <- p + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  }
+  
+  return(p)
+}
+
+# Generate the individual plots
+plot_cvlfq <- create_plot(df_long %>% filter(Metric == "CVLFQ"), "CVLFQ", show_x_labels = FALSE)
+plot_maxlfq <- create_plot(df_long %>% filter(Metric == "MedianLFQ"), "MaxLFQ", log_transform = TRUE, show_x_labels = FALSE)
+plot_meanlfq <- create_plot(df_long %>% filter(Metric == "MeanLFQ"), "MeanLFQ", log_transform = TRUE, show_x_labels = FALSE)
+plot_sdlfq <- create_plot(df_long %>% filter(Metric == "SDLFQ"), "SDLFQ", log_transform = TRUE, show_x_labels = TRUE)
+
+# Combine the plots using patchwork
+combined_plot <- plot_cvlfq / plot_maxlfq / plot_meanlfq / plot_sdlfq + 
+  plot_layout(guides = "collect") & theme(legend.position = "bottom")
+
+# Display the combined plot
+print(combined_plot)
+```
+
+```{r}
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, 
+                           draw_group = function(self, data, ..., draw_quantiles = NULL) {
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1, "group"]
+  newdata <- plyr::arrange(transform(data, x = if (grp %% 2 == 1) xminv else xmaxv), if (grp %% 2 == 1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1, nrow(newdata) - 1, nrow(newdata)), "x"] <- round(newdata[1, "x"])
+
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <=
+      1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., 
+                              draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, 
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, 
+        position = position, show.legend = show.legend, inherit.aes = inherit.aes, 
+        params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
+```
+
+
+```{r}
+# Assuming final_df is the data frame provided
+# Subset the relevant columns
+subset_df <- final_df[, c("M1-AI_MeanLFQ", "M1-AS_MeanLFQ", "M2-AI_MeanLFQ", "M2-AS_MeanLFQ")]
+
+# Melt the data frame for easier plotting
+melted_df <- melt(subset_df, variable.name = "Condition", value.name = "MeanLFQ")
+
+# Create new columns for M1/M2 and AI/AS
+melted_df <- melted_df %>%
+  mutate(
+    Method = ifelse(grepl("M1", Condition), "2Step+", "2Step"),
+    Type = ifelse(grepl("AI", Condition), "AI", "AS")
+  )
+
+ggplot(melted_df, aes(x = Method, y = MeanLFQ, fill = Type)) +
+  geom_split_violin() +
+  labs(title = "Mean LFQ Values by Method", x = "Method", y = "Mean LFQ") +
+  theme_minimal() +
+  scale_fill_manual(values = c("royalblue", "palegreen3"))
+```
+
+```{r}
+# Subset the relevant columns
+subset_df <- final_df[, c("M1-AI_MeanLFQ", "M1-AS_MeanLFQ", "M2-AI_MeanLFQ", "M2-AS_MeanLFQ")]
+
+# Melt the data frame for easier plotting
+melted_df <- melt(subset_df, variable.name = "Condition", value.name = "MeanLFQ")
+
+# Create new columns for M1/M2 and AI/AS and log-transform MeanLFQ
+melted_df <- melted_df %>%
+  mutate(
+    Method = ifelse(grepl("M1", Condition), "2Step+", "2Step"),
+    Type = ifelse(grepl("AI", Condition), "AI", "AS"),
+    LogMeanLFQ = log10(MeanLFQ)
+  )
+
+
+# Create the split violin plot with log-transformed MeanLFQ
+ggplot(melted_df, aes(x = Method, y = LogMeanLFQ, fill = Type)) +
+  geom_split_violin() +
+  labs(title = "Log-Transformed Mean LFQ Values by Method", x = "Method", y = "Log Mean LFQ") +
+  theme_minimal() +
+  scale_fill_manual(values = c("royalblue", "palegreen3"))
+```
+
+```{r}
+# Subset the relevant columns
+subset_df <- final_df[, c("M1-AI_MeanLFQ", "M1-AS_MeanLFQ", "M2-AI_MeanLFQ", "M2-AS_MeanLFQ")]
+
+# Melt the data frame for easier plotting
+melted_df <- melt(subset_df, variable.name = "Condition", value.name = "MeanLFQ")
+
+# Create new columns for M1/M2 and AI/AS and log-transform MeanLFQ
+melted_df <- melted_df %>%
+  mutate(
+    Method = ifelse(grepl("M1", Condition), "2Step+", "2Step"),
+    Type = ifelse(grepl("AI", Condition), "AI", "AS"),
+    LogMeanLFQ = log10(MeanLFQ)
+  )
+
+
+# Create the split violin plot with log-transformed MeanLFQ
+ggplot(melted_df, aes(x = Type, y = LogMeanLFQ, fill = Method)) +
+  geom_split_violin() +
+  labs(title = "Log-Transformed Mean LFQ Values by Buffer Type", x = "Buffer Type", y = "Log Mean LFQ") +
+  theme_minimal() +
+  scale_fill_manual(values = c("#E69F00", "#56B4E9"))
+```
+
+
+## Attributes
+
+```{r}
+library("UniprotR")
+GetProteomeFasta("UP000002494" , directorypath = "data/")
+```
+
+```{r}
+library(Biostrings)
+
+# Define the path to the FASTA file
+fasta_file <- "data/UP000002494.fasta"
+
+# Read the FASTA file
+fasta_sequences <- readAAStringSet(fasta_file)
+
+# Extract Protein IDs and sequences
+protein_ids <- names(fasta_sequences)
+sequences <- as.character(fasta_sequences)
+
+# Create a data frame mapping Protein IDs to sequences
+protein_sequence_map <- data.frame(ProteinID = protein_ids, Sequence = sequences, stringsAsFactors = FALSE)
+
+# Split the ProteinID by '|' and extract the second element
+protein_sequence_map$ProteinID <- sapply(strsplit(protein_sequence_map$ProteinID, "\\|"), `[`, 2)
+
+```
+
+
+
+```{r}
+result_df <- combined_df[c("ID", "Protein.Group", "Genes", "Protein.Names")] %>%
+  mutate(Protein.ID = Protein.Group) %>%
+  separate_rows(Protein.ID, sep = ";") %>%
+  distinct() %>%
+  left_join(protein_sequence_map, by = c("Protein.ID" = "ProteinID")) 
+
+```
+
+```{r}
+library("Peptides")
+# Function to calculate properties for a sequence
+calculate_properties <- function(seq) {
+  if (is.na(seq)) {
+    return(data.frame(pI = NA, mw = NA, gravy = NA))
+  }
+  pI_value <- pI(seq = seq, pKscale = "Bjellqvist")
+  mw_value <- mw(seq = seq, monoisotopic = FALSE)
+  gravy_value <- hydrophobicity(seq = seq, scale = "KyteDoolittle")
+  return(data.frame(pI = pI_value, mw = mw_value, gravy = gravy_value))
+}
+
+# Apply the function to each sequence in the data frame
+properties_df <- do.call(rbind, lapply(result_df$Sequence, calculate_properties))
+
+# Combine the properties with the original data frame
+result_with_properties_df <- cbind(result_df, properties_df)
+
+```
+
+```{r}
+attributes_df <- result_with_properties_df %>%
+  group_by(ID, Protein.Group, Genes, Protein.Names) %>%
+  summarize(
+    mean_pI = mean(pI, na.rm = TRUE),
+    mean_mw = mean(mw, na.rm = TRUE),
+    mean_gravy = mean(gravy, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+write.csv(attributes_df, "attributes_df.csv", row.names = FALSE)
+```
+
+
+## Only in 2step or 2step+
+
+```{r}
+# Filter combined_df for relevant methods
+filtered_df <- combined_df %>%
+  filter(Method %in% c("2step", "2step+")) %>%
+  mutate(Protein.ID = Protein.Group) %>%
+  separate_rows(Protein.ID, sep = ";") %>%
+  left_join(result_with_properties_df, by=c("ID","Protein.Group","Genes","Protein.ID"))
+
+# Identify IDs uniquely found in either "2step" or "2step+" methods or shared
+unique_ids <- filtered_df %>%
+  group_by(ID) %>%
+  summarize(Methods = n_distinct(Method)) %>%
+  ungroup()
+
+# Join the unique_ids back to the filtered_df to retain the Method column
+unique_ids <- filtered_df %>%
+  left_join(unique_ids, by = "ID")
+
+# Classify IDs
+filtered_df <- unique_ids %>%
+  mutate(Category = ifelse(Methods == 1,
+                           ifelse(Method == "2step", "Only 2step",
+                                  ifelse(Method == "2step+", "Only 2step+", NA)),
+                           ifelse(Methods > 1, "Shared", NA)))
+
+
+# Categorize by buffer type
+buffer_categories <- filtered_df %>%
+  group_by(ID, Method) %>%
+  summarize(Buffers = n_distinct(Buffer_name)) %>%
+  ungroup() 
+
+buffer_categories <- filtered_df %>%
+  left_join(buffer_categories, by = c("ID", "Method"))
+
+filtered_df <- buffer_categories %>%
+  mutate(Buffer_Category = ifelse(Buffers == 1,
+                                  ifelse(Buffer_name == "AI", "Only AI",
+                                         ifelse(Buffer_name == "AS", "Only AS", NA)),
+                                  ifelse(Buffers > 1, "Both", NA)))
+
+
+# Summarize data for plotting
+plot_data <- filtered_df %>%
+  group_by(Category, Buffer_Category) %>%
+  summarize(Count = n_distinct(Protein.ID))
+  #summarize(Count = n_distinct(ID))
+
+# Create bar plot
+ggplot(plot_data, aes(x = Category, y = Count, fill = Buffer_Category)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Number of IDs by Method and Buffer Type",
+       x = "Category",
+       y = "Number of IDs") +
+  scale_fill_manual(values = c("Only AI" = "royalblue", "Only AS" = "palegreen3", "Both" = "#56B4E9")) +
+  theme_minimal() +
+  geom_text(aes(label = Count), vjust = -0.3, position = position_dodge(0.9), size = 3)
+```
+
+
+
+```{r}
+# Filter the original filtered_df based on unique IDs
+filtered_df2 <- filtered_df %>%
+  filter(Category != "Shared")
+
+melted_df <- melt(filtered_df2, id.vars = c("ID", "Protein.Group", "Genes", "Method", "Buffer_name"),
+                  measure.vars = c("pI", "mw", "gravy"),
+                  variable.name = "Property",
+                  value.name = "Value")
+
+# Function to plot each property
+plot_property <- function(df, property, log_scale = FALSE) {
+  p <- ggplot(df %>% filter(Property == property), aes(x = Buffer_name, y = Value, fill = Method)) +
+    geom_split_violin() +
+    theme_minimal() +
+    scale_fill_manual(values = c("#E69F00", "#56B4E9"))
+  
+  if (log_scale) {
+    p <- p + scale_y_log10() +
+      labs(title = paste("Log10", property, "by Buffer Type"), x = "Buffer Type", y = property) 
+  } else {
+    p <- p + labs(title = paste(property, "by Buffer Type"), x = "Buffer Type", y = property) 
+  }
+  
+  return(p)
+}
+
+# Plot for pI
+plot_pI <- plot_property(melted_df, "pI")
+print(plot_pI)
+
+# Plot for mw with logarithmic scale
+plot_mw <- plot_property(melted_df, "mw", log_scale = TRUE)
+print(plot_mw)
+
+# Plot for gravy
+plot_gravy <- plot_property(melted_df, "gravy")
+print(plot_gravy)
+```
+### Unique for Buffer
+
+```{r}
+unique_ids <- filtered_df2 %>%
+  group_by(Method, Protein.ID) %>%
+  filter(n() == 1) %>%
+  ungroup()
+
+filtered_unique_df <- filtered_df2 %>%
+  semi_join(unique_ids, by = c("ID", "Protein.Group", "Genes", "Method", "Buffer_name", "Protein.ID"))
+
+# Melt the data frame for ggplot
+melted_df <- melt(filtered_unique_df, id.vars = c("ID", "Protein.Group", "Genes", "Method", "Buffer_name"),
+                  measure.vars = c("pI", "mw", "gravy"),
+                  variable.name = "Property",
+                  value.name = "Value")
+
+# Plot for pI
+plot_pI <- plot_property(melted_df, "pI")
+print(plot_pI)
+
+# Plot for mw with logarithmic scale
+plot_mw <- plot_property(melted_df, "mw", log_scale = TRUE)
+print(plot_mw)
+
+# Plot for gravy
+plot_gravy <- plot_property(melted_df, "gravy")
+print(plot_gravy)
+```
+```{r}
+# Calculate the number of unique Protein.Groups and Protein.IDs per method and buffer
+count_df <- filtered_unique_df %>%
+  group_by(Method, Buffer_name) %>%
+  summarize(
+    Unique_Protein_Groups = n_distinct(Protein.Group),
+    Unique_Protein_IDs = n_distinct(Protein.ID)
+  )
+
+# Melt the data frame for plotting
+count_melted_df <- melt(count_df, id.vars = c("Method", "Buffer_name"),
+                        measure.vars = c("Unique_Protein_Groups", "Unique_Protein_IDs"),
+                        variable.name = "Count_Type",
+                        value.name = "Count")
+
+# Bar plot function
+plot_counts <- function(df) {
+  ggplot(df, aes(x = Buffer_name, y = Count, fill = Method)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "Unique Protein Groups and IDs by Buffer Type", x = "Buffer Type", y = "Count") +
+    geom_text(aes(label = Count), vjust = -0.3, position = position_dodge(0.9), size = 3) +
+    theme_minimal() +
+    scale_fill_manual(values = c("#E69F00", "#56B4E9")) +
+    facet_wrap(~ Count_Type, scales = "free_y")
+}
+
+# Plot counts
+plot_counts <- plot_counts(count_melted_df)
+print(plot_counts)
+```
+
+### With shared
+ 
+```{r}
+shared_ids <- filtered_df2 %>%
+  group_by(Method, Protein.ID) %>%
+  filter(n() == 2) %>%
+  ungroup()
+
+filtered_shared_df <- filtered_df2 %>%
+  semi_join(shared_ids, by = c("ID", "Protein.Group", "Genes", "Method", "Buffer_name", "Protein.ID"))
+
+```
+
+```{r}
+# Calculate the number of unique Protein.Groups and Protein.IDs per method and buffer
+count_df <- filtered_unique_df %>%
+  group_by(Method, Buffer_name) %>%
+  summarize(
+    Protein_Groups = n_distinct(Protein.Group),
+    Protein_IDs = n_distinct(Protein.ID)
+  )
+
+# Melt the data frame for plotting
+count_melted_df <- melt(count_df, id.vars = c("Method", "Buffer_name"),
+                        measure.vars = c("Protein_Groups", "Protein_IDs"),
+                        variable.name = "Count_Type",
+                        value.name = "Count") %>%
+  mutate(Buffer_name = paste("Unique ", Buffer_name))
+                  
+
+
+# Calculate the number of unique Protein.Groups and Protein.IDs per method and buffer
+count_df <- filtered_shared_df %>%
+  group_by(Method) %>%
+  summarize(
+    Protein_Groups = n_distinct(Protein.Group),
+    Protein_IDs = n_distinct(Protein.ID)
+  )
+
+# Melt the data frame for plotting
+count_melted_df2 <- melt(count_df, id.vars = c("Method"),
+                        measure.vars = c("Protein_Groups", "Protein_IDs"),
+                        variable.name = "Count_Type",
+                        value.name = "Count") %>%
+  mutate(Buffer_name = "Shared")
+
+# Bar plot function
+plot_counts <- function(df) {
+  ggplot(rbind(count_melted_df, count_melted_df2), aes(x = Buffer_name, y = Count, fill = Method)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "Protein Groups and IDs by Buffer Type", x = "Buffer Type", y = "Count") +
+    geom_text(aes(label = Count), vjust = -0.3, position = position_dodge(0.9), size = 3) +
+    theme_minimal() +
+    scale_fill_manual(values = c("#E69F00", "#56B4E9")) +
+    facet_wrap(~ Count_Type, scales = "free_y")
+}
+
+# Plot counts
+plot_counts <- plot_counts(count_melted_df)
+print(plot_counts)
+```
+#### Scatter
+
+```{r}
+# Update Buffer_name in filtered_shared_df to "Shared"
+filtered_shared_df2 <- filtered_shared_df %>%
+  mutate(Buffer_name = "Shared")
+
+# Combine the two data frames
+plot_df <- bind_rows(filtered_shared_df2, filtered_unique_df)
+
+# Select necessary columns and remove duplicate rows
+final_df <- plot_df %>%
+  select(ID, Protein.Group, Genes, Method, Buffer_name, pI, mw, gravy) %>%
+  distinct()
+
+# Transform mw to its logarithmic value
+final_df <- final_df %>%
+  mutate(log_mw = log10(mw))
+
+# Create a function to generate scatter plots for each method
+plot_scatter <- function(data, method) {
+  data_filtered <- data %>% filter(Method == method)
+  ggplot(data_filtered, aes(x = log_mw, y = pI, color = Buffer_name)) +
+    geom_point() +
+    labs(title = paste("Scatter plot of pI vs. log(mw) for", method), 
+         x = "Log(Molecular Weight)", y = "Isoelectric Point (pI)") +
+    theme_minimal() +
+    scale_color_manual(values = c("AS" = "#E69F00", "AI" = "#56B4E9", "Shared" = "#009E73"))
+}
+
+# Generate scatter plots for "2step" and "2step+"
+plot_2step <- plot_scatter(final_df, "2step")
+plot_2step_plus <- plot_scatter(final_df, "2step+")
+
+# Print the plots
+print(plot_2step)
+print(plot_2step_plus)
+
+
+```
+
+```{r}
+# Update Buffer_name in filtered_shared_df to "Shared"
+filtered_shared_df2 <- filtered_shared_df %>%
+  mutate(Buffer_name = "Shared")
+
+# Combine the two data frames
+combined_df <- filtered_unique_df
+
+# Select necessary columns and remove duplicate rows
+final_df <- combined_df %>%
+  select(ID, Protein.Group, Genes, Method, Buffer_name, pI, mw, gravy) %>%
+  distinct()
+
+# Transform mw to its logarithmic value
+final_df <- final_df %>%
+  mutate(log_mw = log10(mw))
+
+# Create a function to generate scatter plots for each method
+plot_scatter <- function(data, method) {
+  data_filtered <- data %>% filter(Method == method)
+  ggplot(data_filtered, aes(x = log_mw, y = pI, color = Buffer_name)) +
+    geom_point() +
+    labs(title = paste("Scatter plot of pI vs. log(mw) for", method), 
+         x = "Log(Molecular Weight)", y = "Isoelectric Point (pI)") +
+    theme_minimal() +
+    scale_color_manual(values = c("AS" = "#E69F00", "AI" = "#56B4E9", "Shared" = "#009E73"))
+}
+
+# Generate scatter plots for "2step" and "2step+"
+plot_2step <- plot_scatter(final_df, "2step")
+plot_2step_plus <- plot_scatter(final_df, "2step+")
+
+# Print the plots
+print(plot_2step)
+print(plot_2step_plus)
+
+
+```
+
+## Check for 2/4 repl
+
+2step vs 2step+
+
+```{r}
+unique_ids_2step <- unique_ids[unique_ids$Category == "Only 2step",] #466 -> #329
+unique_ids_2step_plus <- unique_ids[unique_ids$Category == "Only 2step+",] #401 -> #288
+
+all_ids_2step <- dataset_filtered_repl[dataset_filtered_repl$Method == "2step"]
+all_ids_2step_plus <- dataset_filtered_repl[dataset_filtered_repl$Method == "2step+"]
+```
+
+```{r}
+found_ids <- unique(unique_ids_2step[unique_ids_2step$ID %in% unique(all_ids_2step_plus$ID),]$ID)
+not_found_ids <- unique_ids_2step[!unique_ids_2step$ID %in% unique(all_ids_2step_plus$ID),]
+not_found_ids$Unique_Repl_Biol_Count <- 0
+nonunique_ids_2step <- all_ids_2step_plus[all_ids_2step_plus$ID %in% found_ids,] #276
+checked_2step <- rbind(nonunique_ids_2step[,c("Method", "Buffer_name", "ID", "Unique_Repl_Biol_Count")], 
+                       not_found_ids[,c("Method", "Buffer_name", "ID", "Unique_Repl_Biol_Count")])
+
+found_ids <- unique(unique_ids_2step_plus[unique_ids_2step_plus$ID %in% unique(all_ids_2step$ID),]$ID)
+not_found_ids <- unique_ids_2step_plus[!unique_ids_2step_plus$ID %in% unique(all_ids_2step$ID),]
+not_found_ids$Unique_Repl_Biol_Count <- 0
+nonunique_ids_2step_plus <- all_ids_2step[all_ids_2step$ID %in% found_ids,] #271
+checked_2step_plus <- rbind(nonunique_ids_2step_plus[,c("Method", "Buffer_name", "ID", "Unique_Repl_Biol_Count")], 
+                            not_found_ids[,c("Method", "Buffer_name", "ID", "Unique_Repl_Biol_Count")])
+```
+
+```{r}
+checked_total <- rbind(checked_2step, checked_2step_plus) %>%
+  distinct()
+
+total_unique_ids_both <- checked_total %>%
+  group_by(Method, Unique_Repl_Biol_Count) %>%
+  distinct() %>%
+  mutate(Buffer_name = "Both")
+
+checked_total <- rbind(checked_total, total_unique_ids_both)  %>% distinct()
+# intersection, not union !
+checked_total_copy <- checked_total
+checked_total_copy$Unique_Repl_Biol_Count <- "Total"
+checked_total_copy <- checked_total_copy %>% distinct()
+  
+ggplot(rbind(checked_total, checked_total_copy), aes(x = as.factor(Unique_Repl_Biol_Count), fill = Buffer_name)) +
+  geom_bar(position = position_dodge(), stat = "count") +
+  geom_text(stat = "count", aes(label = ..count..), position = position_dodge(0.9), vjust = -0.3) +
+  facet_wrap(~ Method) +
+  labs(title = "Unique Replicate Biological Counts by Method",
+       x = "Unique Replicate Biological Count",
+       y = "Count",
+       fill = "Buffer Name") +
+  scale_fill_manual(values = c("AI" = "royalblue", "AS" = "palegreen3", "Both" = "#56B4E9")) +
+  theme_minimal()
+```
+
+
+### Venn with all
+
+2step
+
+```{r}
+# Prepare the unique sets for the Venn diagram
+unique_ids_2step_AS <- unique_ids_2step %>%
+  filter(Buffer_name == "AS") %>%
+  pull(ID)
+
+unique_ids_2step_AI <- unique_ids_2step %>%
+  filter(Buffer_name == "AI") %>%
+  pull(ID)
+
+all_ids_2step_plus_AS <- all_ids_2step_plus %>%
+  filter(Buffer_name == "AS") %>%
+  pull(ID)
+
+all_ids_2step_plus_AI <- all_ids_2step_plus %>%
+  filter(Buffer_name == "AI") %>%
+  pull(ID)
+
+# Combine all IDs into one vector
+all_ids <- unique(c(unique_ids_2step_AS, unique_ids_2step_AI, all_ids_2step_plus_AS, all_ids_2step_plus_AI))
+
+# Create a data frame for the UpSet plot
+upset_df <- data.frame(
+  ID = all_ids,
+  `2step AS` = ifelse(all_ids %in% unique_ids_2step_AS, 1, 0),
+  `2step AI` = ifelse(all_ids %in% unique_ids_2step_AI, 1, 0),
+  `2step+ AS` = ifelse(all_ids %in% all_ids_2step_plus_AS, 1, 0),
+  `2step+ AI` = ifelse(all_ids %in% all_ids_2step_plus_AI, 1, 0)
+)
+
+names(upset_df) <- c("ID","2step AS", "2step AI", "all 2step+ AS", "all 2step+ AI")
+
+# Create the UpSet plot
+upset(upset_df, sets = c("2step AS", "2step AI", "all 2step+ AS", "all 2step+ AI"), keep.order = TRUE, set_size.show = T)
+
+```
+
+2step+
+
+```{r}
+# Prepare the unique sets for the Venn diagram
+unique_ids_2step_plus_AS <- unique_ids_2step_plus %>%
+  filter(Buffer_name == "AS") %>%
+  pull(ID)
+
+unique_ids_2step_plus_AI <- unique_ids_2step_plus %>%
+  filter(Buffer_name == "AI") %>%
+  pull(ID)
+
+all_ids_2step_AS <- all_ids_2step %>%
+  filter(Buffer_name == "AS") %>%
+  pull(ID)
+
+all_ids_2step_AI <- all_ids_2step %>%
+  filter(Buffer_name == "AI") %>%
+  pull(ID)
+
+# Combine all IDs into one vector
+all_ids <- unique(c(unique_ids_2step_plus_AS, unique_ids_2step_plus_AI, all_ids_2step_AS, all_ids_2step_AI))
+
+# Create a data frame for the UpSet plot
+upset_df <- data.frame(
+  ID = all_ids,
+  `2step+ AS` = ifelse(all_ids %in% unique_ids_2step_plus_AS, 1, 0),
+  `2step+ AI` = ifelse(all_ids %in% unique_ids_2step_plus_AI, 1, 0),
+  `2step AS` = ifelse(all_ids %in% all_ids_2step_AS, 1, 0),
+  `2step AI` = ifelse(all_ids %in% all_ids_2step_AI, 1, 0)
+)
+
+names(upset_df) <- c("ID","2step+ AS", "2step+ AI", "all 2step AS", "all 2step AI")
+
+# Create the UpSet plot
+upset(upset_df, sets = c("2step+ AS", "2step+ AI", "all 2step AS", "all 2step AI"), keep.order = TRUE, set_size.show = T)
+
+```
+
+## Calcula

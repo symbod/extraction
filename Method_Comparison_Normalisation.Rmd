@@ -1,0 +1,1160 @@
+---
+title: "Method Comparison"
+author: "Vivien Wiltzsch"
+date: "2024-03-01"
+output: 
+  html_document:
+    toc : true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+
+library("readr")
+library("ggplot2")
+library("dplyr")
+library("tidyr")
+library("stringr")
+library("purrr")
+library("forcats")
+library("patchwork")
+library("matrixStats")
+library("gridExtra") # Das folgende Objekt ist maskiert ‘package:dplyr’: combine
+
+#library("PRONE.R")
+#library("UpSetR")
+#library("SummarizedExperiment")
+# set random number seed
+seed = 27
+set.seed(seed)
+
+
+# Define color mapping for Fractions
+fraction_colors <- c("AI" = "royalblue", "AS" = "palegreen3", "Single" = "coral")
+
+```
+
+# Import of data
+```{r}
+# Read the dataset
+dataset_unsorted <- read_tsv("data/report.pg_matrix.tsv")
+sampledescription <- read_csv2("data/SampleDescription.csv" )
+
+
+#insert row name as proteinid number
+dataset_unsorted <- data.frame(ID = as.numeric(rownames(dataset_unsorted)), dataset_unsorted, check.names = FALSE)
+
+#Count rows
+nrow(dataset_unsorted)
+```
+A cumulative number of 5877 protein were identified from the proteomics analysis.
+
+## Restructuring of dataframe
+```{r}
+# Remove the specific string from the headers
+names(dataset_unsorted) <- gsub("/mnt/ag_proteomik/shared_worktmp/20240126_CaGe_Knochenextraktion ohne Label_Thess/Knochenextrakte_", "", names(dataset_unsorted))
+names(dataset_unsorted) <- sub("_Slot.*", "", names(dataset_unsorted))
+```
+
+Now reorder the Columns containing "M1" in a way, that
+1. samples containing "T1" come first, "T2" second, "T3" come third and "T4" come fourth
+2. samples ending with AS come before those ending with AI
+```{r}
+# Define the specific order for the rest of the columns as you have listed
+  specific_columns_order <- c(
+    "M1-B1-T1-AS", "M1-B1-T1-AI", "M1-B2-T1-AS", "M1-B2-T1-AI", "M1-B3-T1-AS", "M1-B3-T1-AI", 
+    "M1-B4-T1-AS", "M1-B4-T1-AI", "M1-B1-T2-AS", "M1-B1-T2-AI", "M1-B2-T2-AS", "M1-B2-T2-AI", 
+    "M1-B3-T2-AS", "M1-B3-T2-AI", "M1-B4-T2-AS", "M1-B4-T2-AI", "M1-B1-T3-AS", "M1-B1-T3-AI", 
+    "M1-B2-T3-AS", "M1-B2-T3-AI", "M1-B3-T3-AS", "M1-B3-T3-AI", "M1-B4-T3-AS", "M1-B4-T3-AI", 
+    "M1-B1-T4-AS", "M1-B1-T4-AI", "M1-B2-T4-AS", "M1-B3-T4-AS", "M1-B3-T4-AI", "M1-B4-T4-AS", 
+    "M1-B4-T4-AI", "M2-B1-AS", "M2-B1-AI", "M2-B2-AS", "M2-B2-AI", "M2-B3-AS", "M2-B3-AI", 
+    "M2-B4-AS", "M2-B4-AI", "M3-B1", "M3-B2", "M3-B3", "M3-B4", "M4-B1", "M4-B2", "M4-B3", "M4-B4", 
+    "M5-B1-AS1", "M5-B1-AI1", "M5-B1-AI2", "M5-B1-AS2", "M5-B2-AS1", "M5-B2-AI1", "M5-B2-AI2", 
+    "M5-B2-AS2", "M5-B3-AS1", "M5-B3-AI1", "M5-B3-AI2", "M5-B3-AS2", "M5-B4-AS1", "M5-B4-AI1", 
+    "M5-B4-AI2", "M5-B4-AS2")
+
+initial_columns_order <- c("ID", "Protein.Names", "Genes", "First.Protein.Description")
+
+reorder_dataset <- function(dataset_unsorted) {
+  # Define the fixed initial columns
+  
+  # Combine initial and specific columns order
+  final_columns_order <- c(initial_columns_order, specific_columns_order)
+  
+  # Filter out any columns that are not in the dataset to avoid errors
+  final_columns_order <- final_columns_order[final_columns_order %in% names(dataset_unsorted)]
+  
+  # Reorder the dataset
+  dataset_sorted <- dataset_unsorted[, final_columns_order]
+  
+  return(dataset_sorted)
+}
+```
+
+```{r}
+# gives newly ordered dataset
+dataset <- reorder_dataset(dataset_unsorted)
+```
+
+
+
+
+
+# Normalization of LfQ data
+### Sample Loading
+This normalization technique adjusts the values in each column based on the average intensity observed across similar types of samples (as grouped by Sample_Type). By scaling each column to match the average, the method attempts to correct for any discrepancies in sample loading or measurement that might have resulted in abnormally high or low readings. The goal is to bring all samples to a common scale, making it easier to compare results across different samples or conditions without the confounding effect of varying starting intensities.
+
+
+Function to calculate colSums of proteins present in all acquired samples
+```{r}
+# Define the function to calculate intensity sums
+calculate_intensity_sums <- function(df) {
+  # Apply filter, selection, and sum operations
+  intensity_sums <- df %>%
+    # Filter out rows that have any NAs in columns matching "^M[1-5]"
+    filter(rowSums(is.na(select(., matches("^M[1-5]")))) == 0) %>%
+    # Select columns that match the pattern "^M[1-5]"
+    select(matches("^M[1-5]")) %>%
+    # Calculate the sum of each selected column
+    colSums()
+  
+  # Return the resulting sums
+  return(intensity_sums)
+}
+################################################################################
+# use for dataframe:  intensity_sums <- calculate_intensity_sums(dataset)
+################################################################################
+```
+
+
+Function for calculation of normalization factors
+```{r}
+calculate_norm_fact <- function(df, sampledescription) {
+  # Calculate column sums after filtering NA values
+  intensity_sums <- df %>%
+    filter(rowSums(is.na(select(., matches("^M[1-5]")))) == 0) %>%
+    select(matches("^M[1-5]")) %>%
+    colSums()
+
+  # Compute normalization factors for each unique sample type
+  norm_fact <- sapply(unique(sampledescription$Sample_Type), function(st) {
+    median_sum <- median(intensity_sums[sampledescription$Sample_Type == st])
+    norm_fact <- median_sum / intensity_sums[sampledescription$Sample_Type == st]
+    return(norm_fact)
+  })
+
+  # Unlist normalization factors and adjust names
+  norm_fact <- setNames(
+    unlist(norm_fact), 
+    sub(".*\\.", "", names(unlist(norm_fact)))
+  )
+
+  # Return the calculated normalization factors
+  return(norm_fact)
+}
+################################################################################
+# use for dataframe:  norm_fact <- calculate_norm_fact(dataset,sampledescription)
+################################################################################
+```
+
+
+Function to apply normalization factors to df
+```{r}
+normalize_df <- function(df, norm_fact) {
+  # Ensure the normalization factors' names directly match the df's column names
+  norm_cols <- names(norm_fact)
+  
+  # Loop through each column name that needs normalization
+  for (col_name in norm_cols) {
+    if (col_name %in% names(df)) {
+      # Multiply the column by its corresponding normalization factor
+      df[[col_name]] <- df[[col_name]] * norm_fact[col_name]
+    }
+  }
+  
+  return(df)
+}
+################################################################################
+# use for dataframe:  dataset_SL_ST_rmNA <- normalize_df(df,norm_fact)
+################################################################################
+```
+
+
+Apply to dataset
+```{r}
+intensity_sums <- calculate_intensity_sums(dataset)
+norm_fact <- calculate_norm_fact(dataset,sampledescription)
+dataset_SL <- normalize_df(dataset,norm_fact)
+
+```
+
+
+
+
+
+
+```{r}
+# Combine both data frames for easier plotting
+dataset$Normalization <- "Unnormalized"
+dataset_SL$Normalization <- "Normalized"
+
+
+
+# Bind the two datasets together for plotting
+combined_dataset <- rbind(dataset, dataset_SL)
+
+# Convert from wide to long format for ggplot
+combined_long <- combined_dataset %>%
+  pivot_longer(
+    cols = matches("^M[1-5]"),
+    names_to = "Measurement",
+    values_to = "Intensity"
+  )
+
+# Plot the comparison using a boxplot
+ggplot(combined_long, aes(x = Measurement, y = log10(Intensity), fill = Normalization)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate x labels for readability
+  labs(
+    title = "Comparison of Unnormalized vs Normalized Intensities",
+    x = "Measurement",
+    y = "log-10 Intensity"
+  )
+
+
+
+
+
+# Function to calculate statistics and reshape the data
+calc_stats <- function(df, Normalization) {
+  df %>%
+    summarise(across(matches("^M[1-5]"), list(
+      mean = ~ mean(., na.rm = TRUE),
+      sd = ~ sd(., na.rm = TRUE),
+      cv = ~ sd(., na.rm = TRUE) / mean(., na.rm = TRUE) * 100
+    ), .names = "{.col}_{.fn}")) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = c("Measurement", ".value"),
+      names_pattern = "(.*)_(mean|sd|cv)"
+    ) %>%
+    mutate(Normalization = Normalization)
+}
+# Calculate stats for unnormalized dataset
+stats_unnormalized <- calc_stats(dataset, "Unnormalized")
+
+# Calculate stats for normalized dataset
+stats_normalized <- calc_stats(dataset_SL, "Normalized")
+
+# Combine the statistics for both datasets
+combined_stats <- rbind(stats_unnormalized, stats_normalized)
+
+# Check the structure of the combined data
+print(head(combined_stats))
+
+# Pivot the data longer for plotting
+combined_stats_long <- pivot_longer(
+  combined_stats,
+  cols = mean:cv,
+  names_to = "Statistic",
+  values_to = "Value"
+)
+
+# Plotting
+ggplot(combined_stats_long, aes(x = Measurement, y = log2(Value), fill = Normalization)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  facet_wrap(~ Statistic, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  labs(title = "Comparison of Statistical Measurements",
+       x = "Measurement",
+       y = "Value")
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Make long-format dataframe
+Make from wide to long format 
+!all NAs are kept here!
+
+First, define two functions
+1) to make dataset from wide to long format
+2) to add more details to long format table (incl columns method, fraction etc)
+```{r}
+# 1) Function to convert dataset to long format
+convert_to_long_format <- function(dataset) {
+  
+  # Convert dataset from wide to long format
+  dataset_long <- dataset %>% 
+    pivot_longer(
+      cols = all_of(specific_columns_order),
+      names_to = "Sample.ID",
+      values_to = "maxLfQ_intensities",
+      # values_drop_na = TRUE  # Optional: drop NA values, remove if you want to keep NAs
+    )
+  
+  # Keep initial columns and add the new long format columns
+  dataset_long <- dataset_long %>% 
+    select(all_of(initial_columns_order), maxLfQ_intensities, Sample.ID)
+  
+  return(dataset_long)
+}
+```
+
+```{r}
+# 2) Define function to modify the long-format dataset with detailed infos on method, sample type, fraction, biological and technical replicate
+
+long_details <- function(dataset) {
+  dataset %>%
+    mutate(
+      # Determine the method based on the start of Sample.ID
+      Method = case_when(
+        str_starts(Sample.ID, "M1") ~ "1",
+        str_starts(Sample.ID, "M2") ~ "2",
+        str_starts(Sample.ID, "M3") ~ "3",
+        str_starts(Sample.ID, "M4") ~ "4",
+        str_starts(Sample.ID, "M5") ~ "5",
+        TRUE ~ "Unknown"
+      ),
+      # Modify Sample_type based on Method
+      Sample_type = case_when(
+        Method %in% c("1", "2", "5") ~ str_replace(Sample.ID, "-B[0-9]+-", "-"),  # Replace "-B[number]-" for Methods 1, 2, and 5
+        Method %in% c("3", "4") ~ str_replace(Sample.ID, "-B[0-9]+", "")  # Modify for Methods 3 and 4
+      ),
+      # Determine Fraction type
+      Fraction = case_when(
+        str_detect(Sample.ID, "AI") ~ "AI",
+        str_detect(Sample.ID, "AS") ~ "AS",
+        TRUE ~ "Single"
+      ),
+      # Biological replicates
+      Biol.Repl = case_when(
+        str_detect(Sample.ID, "B1") ~ "1",
+        str_detect(Sample.ID, "B2") ~ "2",
+        str_detect(Sample.ID, "B3") ~ "3",
+        str_detect(Sample.ID, "B4") ~ "4",
+        TRUE ~ "Unknown"
+      ),
+      # Technical replicates
+      Techn.Repl = case_when(
+        str_detect(Sample.ID, "T1") ~ "T1",
+        str_detect(Sample.ID, "T2") ~ "T2",
+        str_detect(Sample.ID, "T3") ~ "T3",
+        str_detect(Sample.ID, "T4") ~ "T4",
+        TRUE ~ "T1"  # Default to "T1" or modify as necessary
+      )
+    )
+}
+```
+
+
+
+
+
+
+
+```{r}
+#apply 
+dataset_long <- convert_to_long_format(dataset)
+
+# apply function for more details on dataset_long
+dataset_long <- long_details (dataset_long) 
+
+dataset_long <- dataset_long %>%
+  select(ID, Protein.Names, Genes, First.Protein.Description, maxLfQ_intensities, Sample.ID, 
+         Sample_type, Method, Biol.Repl, Techn.Repl, Fraction)
+
+write_tsv(dataset_long, "report.pg_matrix_long.tsv")
+```
+
+# Data processing and evaluation
+
+## Identified proteins per sample
+We will check the number of quantified proteins per analyzed sample by means of non-missing MaxLFQ values. We will extract the numbers and group by sample type.
+
+```{r}
+# Count the number of quantified proteins per sample
+identified_prot <- dataset_long %>%
+  group_by(Sample.ID, Sample_type, Method, Techn.Repl, Fraction) %>%
+  summarise(Quantified_Proteins = sum(!is.na(maxLfQ_intensities) & maxLfQ_intensities > 0), .groups = 'drop') %>%
+  mutate(Sample.ID = factor(Sample.ID, levels = specific_columns_order)) %>%
+  arrange(match(Sample.ID, specific_columns_order))
+
+# Print the result
+print(identified_prot)
+
+# Create the bar chart with facet wrap by 'Method' and color by 'Fraction'
+ggplot(identified_prot, aes(x = Sample.ID, y = Quantified_Proteins, fill = Fraction)) +
+  geom_bar(stat = "identity") +  # Use identity to use Quantified_Proteins values directly
+  facet_wrap(~Method, scales = "free_x") +  # Separate plots by 'Method'
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),  # Improve readability of x-axis labels
+        strip.text.x = element_text(size = 12, face = "bold")) +  # Make facet labels larger and bold
+  labs(title = "Number of Quantified Proteins per Sample, by Method",
+       x = "Sample",
+       y = "Number of Quantified Proteins") +
+  scale_fill_manual(values = fraction_colors)  # Use a color palette that is distinct and clear
+
+```
+
+
+## Quantified proteins per method
+get the combined number of proteins per method, that are reproducible quantified in at 3 out of the 4 biological replicates in at least one of the fraction belonging to one method
+```{r}
+# First analysis: Total number of proteins quantified per method and technical replicate
+total_proteins_quantified <- dataset_long %>%
+  group_by(Method, Techn.Repl) %>%
+  summarise(Total_Quantified_Proteins = n_distinct(ID[!is.na(maxLfQ_intensities)]), .groups = 'drop')
+
+# Second analysis: Proteins quantified in at least 3 of 4 biological replicates
+quantified_in_repls <- dataset_long %>%
+  mutate(Quantified = !is.na(maxLfQ_intensities)) %>%
+  group_by(ID, Method, Techn.Repl, Biol.Repl) %>%
+  summarise(Quantified = any(Quantified), .groups = 'drop') %>%
+  group_by(ID, Method, Techn.Repl) %>%
+  summarise(Quantified_Count = sum(Quantified), .groups = 'drop') %>%
+  filter(Quantified_Count >= 3) %>%
+  group_by(Method, Techn.Repl) %>%
+  summarise(Total_Proteins_3_4_Repls = n_distinct(ID), .groups = 'drop')
+
+# Combine the two analyses into one DataFrame
+combined_analysis <- total_proteins_quantified %>%
+  left_join(quantified_in_repls, by = c("Method", "Techn.Repl"))
+
+# Print the resulting combined DataFrame
+print(combined_analysis)
+
+
+
+# Convert from wide to long format to Reshape data for plotting
+combined_analysis_long <- combined_analysis %>%
+  pivot_longer(cols = c("Total_Quantified_Proteins", "Total_Proteins_3_4_Repls"),
+               names_to = "Category",
+               values_to = "Protein_Count") %>%
+  mutate(Category = factor(Category, levels = c("Total_Quantified_Proteins", "Total_Proteins_3_4_Repls"))) %>%
+  arrange(Category, Method, Techn.Repl) # Ensure correct order
+
+# Print the resulting combined DataFrame
+print(combined_analysis_long)
+
+
+
+# Create the bar chart
+#insert label description for x axis in a new column
+combined_analysis_long <- combined_analysis_long %>%
+  mutate(Method_Techn = ifelse(Method == 1, paste("M1", Techn.Repl, sep = "-"), paste0("M", Method)))
+
+
+
+
+
+#plot
+ggplot(subset(combined_analysis_long, Method_Techn %in% c("M3", "M4", "M2", "M1-T1", "M5")), 
+       aes(x = factor(Method_Techn, levels = c("M3", "M4", "M2", "M1-T1", "M5")),
+           y = Protein_Count, 
+           fill = Category)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Protein Quantification Summary", 
+       x = "Method", 
+       y = "No. of quantified proteins",
+       fill = "Quantified Proteins") +
+  scale_fill_manual(values = c("Total_Quantified_Proteins" = "#4D8DB4", "Total_Proteins_3_4_Repls" = "#005B7F"),
+                    labels = c("Total", " 3 of 4 biol. Replicates")) +  # Map legend labels to new text
+  scale_y_continuous(breaks = seq(0, 6000, by = 1000), limits = c(0, 6000)) + # Set y-axis breaks and limits
+  theme_minimal() +
+  theme(text = element_text(size = 18),  # General text size
+        axis.title = element_text(size = 16),  # Axis titles
+        axis.text = element_text(size = 14),  # Axis text
+        plot.title = element_text(size = 20, face = "bold"),
+        legend.position = "bottom")  # Plot title
+  
+
+```
+
+
+
+## maxLfQ value distribution
+Boxplot and violin plot of maxLfQ value distribution
+```{r}
+# Ensure the Fraction column is a factor and set levels in the desired order
+dataset_long$Fraction <- factor(dataset_long$Fraction, levels = c("AS", "AI", "Single"))
+# Create the boxplot grouped colored by 'Fraction'
+ggplot(dataset_long, aes(x = factor(Sample.ID, levels = specific_columns_order),
+                         y = log10(maxLfQ_intensities), fill = Fraction)) +
+    geom_boxplot() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +  # Rotate x-axis labels for better readability
+    labs(title = "Distribution of LfQ Intensities",
+         x = "Sample",
+         y = "log10-transformed maxLfQ Intensities")+
+  scale_fill_manual(values = fraction_colors)
+
+
+
+# Create violin plots for density distribution
+ggplot(dataset_long, aes(x = fct_relevel(factor(Sample.ID, levels = specific_columns_order)), 
+                         y = log10(maxLfQ_intensities), fill = Fraction)) +
+    geom_violin(trim = FALSE) +  
+    geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +  # Overlay boxplots for median and quartiles
+    facet_wrap(~Method, scales = "free_x") +  # Facet by Method with free x scales to reduce unused space
+    scale_fill_manual(values = fraction_colors) +  # Apply custom color mapping for 'Fraction'
+    labs(title = "Distribution of log10-transformed LfQ Intensities by Sample and Method",
+         x = "Sample",
+         y = "log10-transformed maxLfQ Intensities") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+# Density plot for each Sample.ID using log2-transformed maxLfQ_intensities
+```{r}
+# Adjust the Method column to a factor with levels in the desired order
+dataset_long$Method <- factor(dataset_long$Method, levels = c(3, 4, 2, 1, 5))
+
+
+# Combine the plots directly (only techn Repl1)
+combined_plot <- 
+  (ggplot(data = subset(dataset_long, grepl("1", Techn.Repl)), 
+       aes(x = log2(maxLfQ_intensities), group = Sample_type, color = Fraction)) + 
+    geom_density(alpha = 0.2) + 
+    facet_grid(Method ~ .) +  # Facet by Method
+    labs(title = "Distribution of maxLfQ Intensities per Sample Type by Method",
+         x = "log2-transformed maxLfQ Intensities",
+         y = "Density") +
+  scale_color_manual(values = fraction_colors)+
+    theme_minimal()) + # First plot
+
+  ggplot(data = subset(dataset_long, grepl("1", Techn.Repl)), aes(x = log2(maxLfQ_intensities), group = Sample_type, color = Fraction)) + 
+    geom_density(alpha = 0.2) + 
+    facet_grid(Fraction ~ .) +  # Facet by Fraction
+    labs(title = "Distribution of maxLfQ Intensities per Sample Type by Fraction",
+         x = "log2-transformed maxLfQ Intensities",
+         y = "Density") +
+  scale_color_manual(values = fraction_colors)+
+    theme_minimal() +  # Second plot
+
+  plot_layout(guides = 'collect')  # Combine and collect guides (legends)
+
+# Display the combined plot
+combined_plot
+
+```
+
+
+## Quantitative reproducibility
+To estimate the combined biological and technical variance we calculate the CVs of all proteins within the corresponding sample groups.
+
+```{r}
+# Calculate mean, SD, and CV for each ID within each Sample_type
+stats <- dataset_long %>%
+  group_by(ID, Sample_type, Method, Fraction, Techn.Repl) %>%
+  summarise(
+    Median_Intensity = median(maxLfQ_intensities, na.rm = TRUE),
+    Mean_Intensity = mean(maxLfQ_intensities, na.rm = TRUE),
+    SD_Intensity = sd(maxLfQ_intensities, na.rm = TRUE),
+    CV = (SD_Intensity / Mean_Intensity) * 100,
+    N = sum(!is.na(maxLfQ_intensities)),  # Count of non-NA intensity values,
+    .groups = 'drop'  # Ensure the resulting tibble is ungrouped
+  )
+
+write_tsv(stats, "stats_long.tsv")
+
+# Convert stats from long to wide format
+stats_wide <- stats %>%
+  select(-c(Method, Fraction, Techn.Repl)) %>%  # Exclude the Method, Fraction, Techn.Repl columns before pivoting
+  pivot_wider(
+    names_from = Sample_type,
+    values_from = c(Median_Intensity, Mean_Intensity, SD_Intensity, CV, N),
+    names_sep = "_"
+  ) %>%
+  arrange(ID)
+
+```
+
+
+
+### Grouped CVs 
+Use violine plot to visualize the distribution of CVs:
+```{r}
+# Define the specific order for Sample_type
+specific_sample_order <- c("M1-T1-AS", "M1-T1-AI", "M1-T2-AS", "M1-T2-AI", "M1-T3-AS", "M1-T3-AI", 
+                           "M1-T4-AS", "M1-T4-AI", "M2-AS", "M2-AI", "M3", "M4", 
+                           "M5-AS1", "M5-AI1", "M5-AI2", "M5-AS2")
+
+# Ensure the Sample_type column is correctly ordered
+stats$Sample_type <- factor(stats$Sample_type, levels = specific_sample_order)
+
+# for all sample types (all techn. repl)
+ggplot(stats, aes(x = Sample_type, y = CV, fill = Fraction)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  scale_fill_manual(values = fraction_colors) +
+  geom_hline(yintercept = 20, color = "hotpink", linetype = "dashed", size = 0.8) +
+  labs(title = "Coefficient of Variation by Sample Type",
+       x = "Sample Type", 
+       y = "Coefficient of Variation (CV)") +
+  theme_classic()
+
+
+
+# only for techn.repl 1
+ggplot(data = subset(stats, grepl("1", Techn.Repl)), 
+       aes(x = factor(Sample_type, 
+                      levels = c("M3", "M4", "M2-AS", "M2-AI", "M1-T1-AS", "M1-T1-AI", "M1-T2-AS", "M1-T2-AI", 
+                                                "M1-T3-AS", "M1-T3-AI", "M1-T4-AS", "M1-T4-AI", 
+                                                 "M5-AS1", "M5-AI1", "M5-AI2", "M5-AS2")), 
+          y = CV, fill = Fraction)) +
+  geom_violin(trim = FALSE, color = NA) + #color NA macht scharze outline weg
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  scale_fill_manual(values = fraction_colors) +
+  #geom_hline(yintercept = 20, color = "hotpink", linetype = "dashed", size = 0.8) +
+  labs(title = "Coefficient of Variation by Sample Type",
+       x = "Sample Type", 
+       y = "Coefficient of Variation (CV)") +
+  geom_vline(xintercept = c(1.5, 2.5, 4.5, 6.5), linetype = "dashed", colour = "grey") +  # Add vertical lines to separate methods
+  theme_classic()+
+  theme(text = element_text(size = 14),  # General text size
+        axis.title = element_text(size = 16),  # Axis titles
+        axis.text = element_text(size = 12),  # Axis text
+        plot.title = element_text(size = 20, face = "bold"))  # Plot title
+```
+
+plot SD
+```{r}
+# only for techn.repl 1 of method 1, but all others from other methods
+ggplot(data = subset(stats, grepl("1", Techn.Repl)), 
+       aes(x = factor(Sample_type, 
+                      levels = c("M3", "M4", "M2-AS", "M2-AI", "M1-T1-AS", "M1-T1-AI", "M1-T2-AS", "M1-T2-AI", 
+                                                "M1-T3-AS", "M1-T3-AI", "M1-T4-AS", "M1-T4-AI", 
+                                                 "M5-AS1", "M5-AI1", "M5-AI2", "M5-AS2")), 
+          y = log2(SD_Intensity), fill = Fraction)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +  # Rotate x-axis labels for better readability
+  scale_fill_manual(values = fraction_colors) +
+  labs(title = "Standard Deviation by Sample Type",
+       x = "Sample Type", 
+       y = "log2 -transformed Standard Deviation (SD)") +
+  geom_vline(xintercept = c(1.5, 2.5, 4.5, 6.5), linetype = "dashed", colour = "grey") +  # Add vertical lines to separate methods
+  theme_classic()
+  
+
+ggplot(data = subset(stats, grepl("1", Techn.Repl)), 
+       aes(x = factor(Sample_type, 
+                      levels = c("M3", "M4", "M2-AS", "M2-AI", "M1-T1-AS", "M1-T1-AI", "M1-T2-AS", "M1-T2-AI", 
+                                                "M1-T3-AS", "M1-T3-AI", "M1-T4-AS", "M1-T4-AI", 
+                                                 "M5-AS1", "M5-AI1", "M5-AI2", "M5-AS2")), 
+          y = log10(SD_Intensity), fill = Fraction)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +  # Rotate x-axis labels for better readability
+  scale_fill_manual(values = fraction_colors) +
+  labs(title = "Standard Deviation by Sample Type",
+       x = "Sample Type", 
+       y = "log10 -transformed Standard Deviation (SD)") +
+  geom_vline(xintercept = c(1.5, 2.5, 4.5, 6.5), linetype = "dashed", colour = "grey") +  # Add vertical lines to separate methods
+  theme_classic()
+```
+
+
+```{r}
+# Plot the CV of values in the Method column that include '1', filtering directly in the ggplot function
+ggplot(subset(stats, grepl("1", Method)), aes(x = Sample_type, y = CV, fill = Fraction)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  scale_fill_manual(values = fraction_colors) +
+  geom_hline(yintercept = 20, color = "hotpink", linetype = "dashed", size = 0.8) +
+  labs(title = "Coefficient of Variation by Fraction in Technical Replicates",
+       x = "Sample Type", 
+       y = "Coefficient of Variation (CV)") +
+  theme_minimal()
+
+```
+
+
+### Intragroup intensity correlation
+calculate the median and mean MaxLFQ intensity within and across all sample groups per protein (column ID). Further, the rank (descending) of median or mean MaxLFQ intensities (across groups) will be calculated.
+```{r}
+rowstats <- data.frame(ID = dataset$ID)
+
+# Calculate 'mean.all' as the row means of specified columns in 'dataset'
+rowstats$mean.all <- rowMeans(dataset[, 5:67], na.rm = TRUE)
+# Calculate 'mean.rank' based on 'mean.all'
+rowstats$mean.rank <- nrow(dataset) + 1 - rank(rowstats$mean.all)
+
+# Calculate 'median.all' as the row medians of specified columns in 'dataset'
+rowstats$median.all <- rowMedians(as.matrix(dataset[, 5:67]), na.rm = TRUE)
+# Calculate 'median.rank' based on 'median.all'
+rowstats$median.rank <- nrow(dataset) + 1 - rank(rowstats$median.all)
+
+
+# Check if columns "mean.rank" and "mean.all" are present in the stats dataframe
+if (!("mean.rank" %in% colnames(stats)) & !("mean.all" %in% colnames(stats))) {
+  # Merge only if the columns do not already exist
+  stats <- merge(stats, rowstats, by = "ID", all.x = TRUE)
+}
+
+
+# Define the specific order for Sample_type
+specific_sample_order <- c("M1-T1-AS", "M1-T1-AI", "M1-T2-AS", "M1-T2-AI", "M1-T3-AS", "M1-T3-AI", 
+                           "M1-T4-AS", "M1-T4-AI", "M2-AS", "M2-AI", "M3", "M4", 
+                           "M5-AS1", "M5-AI1", "M5-AI2", "M5-AS2")
+
+# Ensure the Sample_type column is correctly ordered
+stats$Sample_type <- factor(stats$Sample_type, levels = specific_sample_order)
+
+ggplot(data = stats, aes(x = mean.rank, log10(Mean_Intensity), color = Sample_type)) +
+  geom_point(alpha = 0.4) +
+  scale_x_continuous(name = "mean MaxLFQ intensity rank (across groups)") +
+  scale_y_continuous(name = "mean MaxLFQ intensity (within groups)") +
+  facet_wrap(. ~ Sample_type)
+
+
+ggplot(data = stats, aes(x = median.rank, log10(Median_Intensity), color = Sample_type)) +
+  geom_point(alpha = 0.4) +
+  scale_x_continuous(name = "median MaxLFQ intensity rank (across groups)") +
+  scale_y_continuous(name = "median MaxLFQ intensity (within groups)") +
+  facet_wrap(. ~ Sample_type)
+  
+
+
+```
+
+```{r}
+ggplot(data = subset(stats, grepl(c("2","3","4"), Method)), aes(x = median.rank, log10(Median_Intensity), color = Sample_type)) +
+  geom_point(alpha = 0.4) +
+  scale_x_continuous(name = "median MaxLFQ intensity rank (across groups)") +
+  scale_y_continuous(name = "median MaxLFQ intensity (within groups)") +
+  facet_wrap(. ~ Sample_type)
+```
+
+
+
+
+
+# Normalization of LfQ data
+Testing different normalization strategies and methods of "Sample Loading Correction" and compare the standard deviation
+
+## Subset per Sampletype
+First we prepare a function that creates a list per sample type, that contains the intensities of the 4 biological replicates per sample type.
+```{r}
+split_by_sampletype <- function(df, sampledescription) {
+  # Initialize an empty list to store subsets
+  split_datasets <- list()
+  
+  # Loop through each unique sample type
+  for (sampletype in unique(sampledescription$Sample_Type)) {
+    # Identify columns corresponding to the current sample type
+    cols <- names(df)[names(df) %in% sampledescription$Column[sampledescription$Sample_Type == sampletype]]
+    # Subset the df
+    subset_df <- df[, cols, drop = FALSE]
+    # Assign the subset to the list with the sample type as the name
+    split_datasets[[sampletype]] <- subset_df
+  }
+  
+  return(split_datasets)
+}
+################################################################################
+# use for dataframe:  df_st    <- split_by_sampletype(datasetXYZ,sampledescription)
+################################################################################
+```
+
+
+## Statistics per Sampletype
+Next, we prepare a function that performs statistical analyses on the intensities within the separated lists of the 4 biological replicates per sample type.
+```{r}
+# Function to work with created subsets of e.g. "split_by_sampletype"-function
+  statsfunc <- function(df) {
+    
+    results <- lapply(df, 
+                      function(subset) {
+                                    ave <- rowMeans(subset, na.rm = TRUE)
+                                    sd <- apply(subset, 1, sd, na.rm = TRUE)
+                                    cv <- 100 * sd / ave
+      
+      data.frame(ave = ave, sd = sd, cv = cv)
+    })
+    
+    names(results) <- names(df)
+    return(results)
+  }
+```
+
+
+
+## Sample Loading Normalisation
+One normalization that performs sample loading normalization by calculating a norm-factor per individual sample.
+
+### SL-functions
+Require data in wide-format
+
+For using mean of sums of columns
+```{r}
+# function to do grand total (sample loading) normalization
+SL_all_mean <- function(dataset, print_factors = TRUE) { # print_factors: logical to control printing
+  # Separating columns to be normalized
+  col_norm <- dataset[, grep("^M[1-5]", names(dataset))]
+  col_infos <- dataset[, !grepl("^M[1-5]", names(dataset))]
+  
+  # Compute norm factors and scale columns for numeric data only
+  norm_fact <- mean(colSums(col_norm, na.rm = TRUE)) / colSums(col_norm, na.rm = TRUE)
+  df_sl  <- sweep(col_norm, 2, norm_fact, FUN = "*")
+  
+  # Print the normalization factors for QC check if requested
+  if (print_factors == TRUE) {
+    cat("\nSample Loading Normalization Factors:\n")
+    cat(sprintf("%s - %0.3f\n", colnames(col_norm), norm_fact))
+  }
+  
+  # Combine non-numeric and normalized numeric data, non-numeric first
+  df_sl <- cbind(col_infos, df_sl)
+  
+  return(df_sl)  # Return the combined and normalized dataset
+}
+################################################################################
+# use for dataframe:  df_sl    <- SL_all_mean(datasetXYZ, print_factors = TRUE)
+# use for list:       list_sl  <- lapply(listXYZ, SL_all_mean)
+################################################################################
+```
+
+For using median of sums of columns
+```{r}
+# function to do grand total (sample loading) normalization
+SL_all_median <- function(dataset, print_factors = TRUE) { # print_factors: logical to control printing
+    # Separating columns to be normalized
+  col_norm <- dataset[, grep("^M[1-5]", names(dataset))]
+  col_infos <- dataset[, !grepl("^M[1-5]", names(dataset))]
+  
+  # Compute norm factors and scale columns for numeric data only
+  norm_fact <- median(colSums(col_norm, na.rm = TRUE)) / colSums(col_norm, na.rm = TRUE)
+  df_sl  <- sweep(col_norm, 2, norm_fact, FUN = "*")
+  
+  # Print the normalization factors for QC check if requested
+  if (print_factors == TRUE) {
+    cat("\nSample Loading Normalization Factors:\n")
+    cat(sprintf("%s - %0.3f\n", colnames(col_norm), norm_fact))
+  }
+  
+  # Combine non-numeric and normalized numeric data, non-numeric first
+  df_sl <- cbind(col_infos, df_sl)
+  
+  return(df_sl)  # Return the combined and normalized dataset
+}
+################################################################################
+# use for dataframe:  df_sl    <- SL_all_median(datasetXYZ, print_factors = TRUE)
+# use for list:       list_sl  <- lapply(listXYZ, SL_all_median)
+################################################################################
+```
+
+
+#### Applied to whole dataset 
+```{r}
+#apply SL norm
+dataset_SL_all_mean    <- SL_all_mean(dataset, print_factors = F)
+dataset_SL_all_median  <- SL_all_median(dataset, print_factors = F)
+
+dataset_long
+dataset_SL_all_mean_long <- convert_to_long_format(dataset_SL_all_mean)
+dataset_SL_all_median_long <- convert_to_long_format(dataset_SL_all_median)
+
+```
+```{r}
+# Plotting the log10 maxLfQ-Intensities in comparison
+
+bind_rows(
+  dataset_long %>% mutate(Normalization = "Initial"),
+  dataset_SL_all_mean_long %>% mutate(Normalization = "SL_Mean"),
+  dataset_SL_all_median_long %>% mutate(Normalization = "SL_Median")
+) %>%
+  ggplot(aes(x = Sample.ID, y = log10(maxLfQ_intensities), fill = Normalization)) +
+  geom_boxplot() +
+  labs(title = "Comparison of Dataset Intensities",
+       x = "Normalization Type",
+       y = "log10 maxLfQ-Intensities") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+#### Applied to subsets of dataset (per sampletype)
+```{r}
+# subset into list, separated by sampletype
+dataset_st    <- split_by_sampletype(dataset,sampledescription)
+
+#apply SL norm
+dataset_st_SL_all_mean  <- lapply(dataset_st, SL_all_mean,print_factors = F)
+dataset_st_SL_all_median  <- lapply(dataset_st, SL_all_median,print_factors = F)
+```
+
+
+```{r}
+# Plotting the log10 maxLfQ-Intensities in comparison
+
+bind_rows(
+  dataset_long %>% mutate(Normalization = "Initial"),
+  dataset_SL_all_mean_long %>% mutate(Normalization = "SL_Mean"),
+  dataset_SL_all_median_long %>% mutate(Normalization = "SL_Median")
+) %>%
+  ggplot(aes(x = Sample.ID, y = log10(maxLfQ_intensities), fill = Normalization)) +
+  geom_boxplot() +
+  labs(title = "Comparison of Dataset Intensities",
+       x = "Normalization Type",
+       y = "log10 maxLfQ-Intensities") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+### SL fraction-wise
+
+to be checked
+```{r}
+SL_st_complete_mean <- function(df, sampledescription, print_factors = TRUE) {
+    # Initialize an empty list to store normalized subsets
+    normalized_datasets <- list()
+
+    # Loop through each unique sample type
+    for (sampletype in unique(sampledescription$Sample_Type)) {
+        # Identify columns corresponding to the current sample type
+        cols <- names(df)[names(df) %in% sampledescription$Column[sampledescription$Sample_Type == sampletype]]
+        # Subset the df for normalization
+        dataset <- df[, cols, drop = FALSE]
+
+        # Separate columns to be normalized based on "^M[1-5]"
+        col_norm <- dataset[, grep("^M[1-5]", names(dataset))]
+        col_infos <- dataset[, !grepl("^M[1-5]", names(dataset))]
+
+        # Compute normalization factors and scale columns for numeric data only
+        norm_fact <- mean(colSums(col_norm, na.rm = TRUE)) / colSums(col_norm, na.rm = TRUE)
+        df_sl <- sweep(col_norm, 2, norm_fact, FUN = "*")
+
+        # Print normalization factors for QC check if requested
+        if (print_factors) {
+            cat("\nSample Loading Normalization Factors for", sampletype, ":\n")
+            cat(sprintf("%s - %0.3f\n", colnames(col_norm), norm_fact))
+        }
+
+        # Combine non-numeric and normalized numeric data, non-numeric first
+        normalized_datasets[[sampletype]] <- cbind(col_infos, df_sl)
+    }
+
+    # Combine all normalized subsets back into one dataframe
+    combined_normalized_df <- do.call(cbind, normalized_datasets)
+    return(combined_normalized_df)  # Return the combined and normalized dataset
+}
+```
+
+
+
+### SL-
+This normalization technique adjusts the values in each column based on the average intensity observed across similar types of samples (as grouped by Sample_Type). By scaling each column to match the average, the method attempts to correct for any discrepancies in sample loading or measurement that might have resulted in abnormally high or low readings. The goal is to bring all samples to a common scale, making it easier to compare results across different samples or conditions without the confounding effect of varying starting intensities.
+
+
+Function to calculate colSums of proteins present in all acqiured samples
+```{r}
+# Define the function to calculate intensity sums
+calculate_intensity_sums <- function(df) {
+  # Apply filter, selection, and sum operations
+  intensity_sums <- df %>%
+    # Filter out rows that have any NAs in columns matching "^M[1-5]"
+    filter(rowSums(is.na(select(., matches("^M[1-5]")))) == 0) %>%
+    # Select columns that match the pattern "^M[1-5]"
+    select(matches("^M[1-5]")) %>%
+    # Calculate the sum of each selected column
+    colSums()
+  
+  # Return the resulting sums
+  return(intensity_sums)
+}
+################################################################################
+# use for dataframe:  intensity_sums <- calculate_intensity_sums(dataset)
+################################################################################
+```
+
+
+Function for calculation of normalisation factors
+```{r}
+calculate_norm_fact <- function(df, sampledescription) {
+  # Calculate column sums after filtering NA values
+  intensity_sums <- df %>%
+    filter(rowSums(is.na(select(., matches("^M[1-5]")))) == 0) %>%
+    select(matches("^M[1-5]")) %>%
+    colSums()
+
+  # Compute normalization factors for each unique sample type
+  norm_fact <- sapply(unique(sampledescription$Sample_Type), function(st) {
+    median_sum <- median(intensity_sums[sampledescription$Sample_Type == st])
+    norm_fact <- median_sum / intensity_sums[sampledescription$Sample_Type == st]
+    return(norm_fact)
+  })
+
+  # Unlist normalization factors and adjust names
+  norm_fact <- setNames(
+    unlist(norm_fact), 
+    sub(".*\\.", "", names(unlist(norm_fact)))
+  )
+
+  # Return the calculated normalization factors
+  return(norm_fact)
+}
+################################################################################
+# use for dataframe:  norm_fact <- calculate_norm_fact(dataset,sampledescription)
+################################################################################
+```
+
+
+Function to apply normalization factors to df
+```{r}
+normalize_df <- function(df, norm_fact) {
+  # Ensure the normalization factors' names directly match the df's column names
+  norm_cols <- names(norm_fact)
+  
+  # Loop through each column name that needs normalization
+  for (col_name in norm_cols) {
+    if (col_name %in% names(df)) {
+      # Multiply the column by its corresponding normalization factor
+      df[[col_name]] <- df[[col_name]] * norm_fact[col_name]
+    }
+  }
+  
+  return(df)
+}
+################################################################################
+# use for dataframe:  dataset_SL_ST_rmNA <- normalize_df(df,norm_fact)
+################################################################################
+```
+
+
+Apply to dataset
+```{r}
+intensity_sums <- calculate_intensity_sums(dataset)
+norm_fact <- calculate_norm_fact(dataset,sampledescription)
+dataset_SL_ST_rmNA <- normalize_df(dataset,norm_fact)
+
+```
+
+
+
+
+
+
+```{r}
+# Combine both data frames for easier plotting
+dataset$Normalization <- "Unnormalized"
+dataset_SL_ST_rmNA$Normalization <- "Normalized"
+
+
+
+# Bind the two datasets together for plotting
+combined_dataset <- rbind(dataset, dataset_SL_ST_rmNA)
+
+# Convert from wide to long format for ggplot
+combined_long <- combined_dataset %>%
+  pivot_longer(
+    cols = matches("^M[1-5]"),
+    names_to = "Measurement",
+    values_to = "Intensity"
+  )
+
+# Plot the comparison using a boxplot
+ggplot(combined_long, aes(x = Measurement, y = log10(Intensity), fill = Normalization)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate x labels for readability
+  labs(
+    title = "Comparison of Unnormalized vs Normalized Intensities",
+    x = "Measurement",
+    y = "Intensity"
+  )
+
+
+
+
+
+# Function to calculate statistics and reshape the data
+calc_stats <- function(df, Normalization) {
+  df %>%
+    summarise(across(matches("^M[1-5]"), list(
+      mean = ~ mean(., na.rm = TRUE),
+      sd = ~ sd(., na.rm = TRUE),
+      cv = ~ sd(., na.rm = TRUE) / mean(., na.rm = TRUE) * 100
+    ), .names = "{.col}_{.fn}")) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = c("Measurement", ".value"),
+      names_pattern = "(.*)_(mean|sd|cv)"
+    ) %>%
+    mutate(Normalization = Normalization)
+}
+# Calculate stats for unnormalized dataset
+stats_unnormalized <- calc_stats(dataset, "Unnormalized")
+
+# Calculate stats for normalized dataset
+stats_normalized <- calc_stats(dataset_SL_ST_rmNA, "Normalized")
+
+# Combine the statistics for both datasets
+combined_stats <- rbind(stats_unnormalized, stats_normalized)
+
+# Check the structure of the combined data
+print(head(combined_stats))
+
+# Pivot the data longer for plotting
+combined_stats_long <- pivot_longer(
+  combined_stats,
+  cols = mean:cv,
+  names_to = "Statistic",
+  values_to = "Value"
+)
+
+# Plotting
+ggplot(combined_stats_long, aes(x = Measurement, y = log2(Value), fill = Normalization)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  facet_wrap(~ Statistic, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  labs(title = "Comparison of Statistical Measurements",
+       x = "Measurement",
+       y = "Value")
+
+
+```
+
+
+
+
+
+
+
+
