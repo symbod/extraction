@@ -537,6 +537,100 @@ ggsave(file.path(final_out_dir, "Method_Comparison.png"), plot = combined_plot)
 print(combined_plot)
 ```
 
+### Upset
+
+```{r}
+# Create binary presence/absence matrix per method
+binary_presence_method <- dataset_filtered_in_3_of_4 %>%
+  distinct(ID, Method) %>%
+  pivot_wider(names_from = Method, values_from = Method,
+              values_fill = list(Method = 0),
+              values_fn = list(Method = function(x) 1)) %>%
+  tibble::column_to_rownames(var = "ID")
+
+# Add an 'all' column to highlight full overlaps
+binary_presence_method$all <- 1
+
+# Optional: Reorder columns (if specific order is desired)
+#binary_presence_method <- binary_presence_method[, c(setdiff(names(binary_presence_method), "all"), "all")]
+binary_presence_method <- binary_presence_method[, c(5,4,3,2,1,6)]
+
+# Identify method columns (excluding 'all')
+method_columns <- setdiff(names(binary_presence_method), "all")
+
+# Query: full intersection of all sets (including "all")
+full_intersection_query <- ComplexUpset::upset_query(
+  intersect = names(binary_presence_method),
+  color = 'orange',
+  fill = 'orange',
+  only_components = c('intersections_matrix')
+)
+
+# Queries: exact 2-way intersections ("all" + one method)
+pairwise_queries <- lapply(method_columns, function(method) {
+  ComplexUpset::upset_query(
+    intersect = c("all", method),
+    color = "steelblue",
+    fill = "steelblue",
+    only_components = c('intersections_matrix', 'No. of\nintersecting\nproteins')
+  )
+})
+
+# Query: highlight just the "all" set bar (not intersections)
+all_set_query <- ComplexUpset::upset_query(
+  set = "all",
+  fill = "orange"
+)
+
+# Combine all queries
+query_list <- c(list(full_intersection_query), pairwise_queries, list(all_set_query))
+
+# Generate the plot
+upset_plot_method <- ComplexUpset::upset(
+  data = binary_presence_method,
+  intersect = names(binary_presence_method),
+  name = "",
+  wrap = TRUE,
+  themes = upset_modify_themes(list(
+    'intersections_matrix' = theme(axis.text.y = element_text(size = 13))
+  )),
+  base_annotations = list(
+    'No. of\nintersecting\nproteins' = intersection_size(
+            bar_number_threshold = 1,
+            text=list(
+                vjust=-0.1,
+                hjust=0.1,
+                angle=45
+            )) +
+      expand_limits(y = 2000) +
+      theme(
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 13),
+        axis.title.y = element_text(size = 13)
+      )
+  ),
+  set_sizes = (
+    upset_set_size()
+    + geom_text(aes(label = ..count..), hjust = 1.1, stat = 'count', size = 4)
+    + annotate(geom = 'text', label = '@', x = 'Count', y = 850, color = 'white', size = 10)
+    + expand_limits(y = 7000)
+    + theme(axis.title.x = element_text(size = 13), axis.text.x = element_text(size = 10))
+  ),
+  sort_sets = FALSE,
+  queries = query_list,
+  sort_intersections_by = 'ratio'
+) + theme(text = element_text(size = 13), axis.title.x = element_text(size = 13))
+
+# Save the plot
+#ggsave(file.path(final_out_dir, "Method_Intersection_with_Highlighted_Exact2.png"), plot = upset_plot_method, width = 10, height = 6, bg = 'white')
+
+# Show the plot
+print(upset_plot_method)
+
+```
+
+
+
 ### Final
 
 ```{r}
@@ -708,6 +802,25 @@ ggsave(file.path(final_out_dir, "Combined_Proteins_and_CVLFQ_Distribution.png"),
 # Print the combined plot
 print(combined_plot)
 ```
+
+```{r}
+legend_grob <- legend_plot + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 1))
+
+combined_plot <-((p1 / p2) + 
+  plot_layout(heights = c(1, 1)) + 
+  plot_annotation(tag_levels = 'A')) / 
+  plot_grid(legend_grob, ncol = 1) +
+  plot_layout(heights = c(1, 1, 0.01, 2))  +
+  upset_plot_method
+
+# Save final output
+ggsave(file.path(final_out_dir, "Figure2.png"),plot = combined_plot,width = 1148, height = 1000, units = "px", dpi = 100)
+
+# Print to screen
+print(combined_plot)
+```
+
+
 
 ```{r}
 # Calculate the median CVLFQ for each Method_Buffer group
@@ -1797,7 +1910,7 @@ create_and_save_summary_plot <- function(df, y_var, log_transform = FALSE, sub_d
                  palette = c("AI" = "royalblue", "AS" = "palegreen3")) +
     facet_wrap(~ Buffer_name) +
     labs(title = "", fill = "Buffer Type",
-         x = "", y = if (log_transform) paste("Log10(", y_var, ")", sep = "") else "Coefficient of Variation in % (malLFQ)") +
+         x = "", y = if (log_transform) paste("Log10(", y_var, ")", sep = "") else "Coefficient of Variation in % (maxLFQ)") +
     theme_minimal() + 
     theme(text = element_text(size = 14)) +
     scale_x_discrete(labels = named_labels)
@@ -2318,4 +2431,729 @@ ggsave(file.path(final_out_dir, "Supplement3.png"), plot = combined_plot, width 
 # Display the combined plot
 print(combined_plot)
 
+```
+
+## Upset
+
+```{r}
+# Create binary presence/absence matrix per method + buffer
+binary_presence_method <- dataset_filtered_in_3_of_4 %>%
+  mutate(Method_Buffer = paste(Method, Buffer_name, sep = "_")) %>%
+  distinct(ID, Method_Buffer) %>%
+  pivot_wider(
+    names_from = Method_Buffer,
+    values_from = Method_Buffer,
+    values_fill = list(Method_Buffer = 0),
+    values_fn = list(Method_Buffer = function(x) 1)
+  ) %>%
+  tibble::column_to_rownames(var = "ID")
+
+# Add an 'all' column to highlight full overlaps
+binary_presence_method$all <- 1
+
+# Optional: Reorder columns (manually or automatically)
+# Example: binary_presence_method <- binary_presence_method[, c(5,4,3,2,1,6)]
+binary_presence_method <- binary_presence_method[, c(setdiff(names(binary_presence_method), "all"), "all")]
+
+# Identify method+buffer columns (excluding 'all')
+method_columns <- setdiff(names(binary_presence_method), "all")
+
+# Query: full intersection of all sets (including "all")
+full_intersection_query <- ComplexUpset::upset_query(
+  intersect = names(binary_presence_method),
+  color = 'orange',
+  fill = 'orange',
+  only_components = c('intersections_matrix')
+)
+
+# Queries: exact 2-way intersections ("all" + one method_buffer)
+pairwise_queries <- lapply(method_columns, function(method) {
+  ComplexUpset::upset_query(
+    intersect = c("all", method),
+    color = "steelblue",
+    fill = "steelblue",
+    only_components = c('intersections_matrix', 'No. of\nintersecting\nproteins')
+  )
+})
+
+# Query: highlight just the "all" set bar (not intersections)
+all_set_query <- ComplexUpset::upset_query(
+  set = "all",
+  fill = "orange"
+)
+
+# Combine all queries
+query_list <- c()#c(list(full_intersection_query), pairwise_queries, list(all_set_query))
+
+# Generate the plot
+upset_plot_method <- ComplexUpset::upset(
+  data = binary_presence_method,
+  intersect = names(binary_presence_method),
+  name = "",
+  wrap = TRUE,
+  themes = upset_modify_themes(list(
+    'intersections_matrix' = theme()
+  )),
+   base_annotations = list(
+    'No. of\nintersecting\nproteins' = intersection_size(
+            bar_number_threshold = 1,
+            text=list(size = 3,
+                vjust=-0.2,
+                hjust=-0.2,
+                angle=45
+            )) +
+      expand_limits(y = 600) 
+  ),
+  set_sizes = (
+    upset_set_size()
+    + geom_text(aes(label = ..count..), hjust = 1.1, stat = 'count')#, size = 4)
+    + annotate(geom = 'text', label = '@', x = 'Count', y = 850, color = 'white')#, size = 10)
+    + expand_limits(y = 7000)
+    + theme()#axis.title.x = element_text(size = 13), axis.text.x = element_text(size = 10))
+  ),
+  sort_sets = FALSE,
+  queries = query_list,
+  sort_intersections_by = 'ratio'
+) +
+  theme()#text = element_text(size = 13), axis.title.x = element_text(size = 13))
+
+# Show the plot
+print(upset_plot_method)
+
+# Optionally save the plot
+ggsave(file.path(final_out_dir, "Upset_Method_Buffer_34.png"),
+        plot = upset_plot_method, width = 30, height = 7, bg = 'white')
+
+```
+
+### Upset all (side plot)
+
+```{r}
+# Create binary presence/absence matrix per method
+binary_presence_method <- dataset_filtered %>%
+  distinct(ID, Method) %>%
+  pivot_wider(names_from = Method, values_from = Method,
+              values_fill = list(Method = 0),
+              values_fn = list(Method = function(x) 1)) %>%
+  tibble::column_to_rownames(var = "ID")
+
+# Add an 'all' column to highlight full overlaps
+binary_presence_method$all <- 1
+
+# Optional: Reorder columns (if specific order is desired)
+#binary_presence_method <- binary_presence_method[, c(setdiff(names(binary_presence_method), "all"), "all")]
+binary_presence_method <- binary_presence_method[, c(5,2,1,4,3,6)]
+
+# Identify method columns (excluding 'all')
+method_columns <- setdiff(names(binary_presence_method), "all")
+
+# Query: full intersection of all sets (including "all")
+full_intersection_query <- ComplexUpset::upset_query(
+  intersect = names(binary_presence_method),
+  color = 'orange',
+  fill = 'orange',
+  only_components = c('intersections_matrix')
+)
+
+# Queries: exact 2-way intersections ("all" + one method)
+pairwise_queries <- lapply(method_columns, function(method) {
+  ComplexUpset::upset_query(
+    intersect = c("all", method),
+    color = "steelblue",
+    fill = "steelblue",
+    only_components = c('intersections_matrix', 'No. of\nintersecting\nproteins')
+  )
+})
+
+# Query: highlight just the "all" set bar (not intersections)
+all_set_query <- ComplexUpset::upset_query(
+  set = "all",
+  fill = "orange"
+)
+
+# Combine all queries
+query_list <- c(list(full_intersection_query), pairwise_queries, list(all_set_query))
+
+# Generate the plot
+upset_plot_method <- ComplexUpset::upset(
+  data = binary_presence_method,
+  intersect = names(binary_presence_method),
+  name = "",
+  wrap = TRUE,
+  themes = upset_modify_themes(list(
+    'intersections_matrix' = theme(axis.text.y = element_text(size = 13))
+  )),
+  base_annotations = list(
+    'No. of\nintersecting\nproteins' = intersection_size(
+            bar_number_threshold = 1,
+            text=list(
+                vjust=-0.1,
+                hjust=0.1,
+                angle=45
+            )) +
+      expand_limits(y = 2500) +
+      theme(
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 13),
+        axis.title.y = element_text(size = 13)
+      )
+  ),
+  set_sizes = (
+    upset_set_size()
+    + geom_text(aes(label = ..count..), hjust = 1.1, stat = 'count', size = 4)
+    + annotate(geom = 'text', label = '@', x = 'Count', y = 850, color = 'white', size = 10)
+    + expand_limits(y = 7000)
+    + theme(axis.title.x = element_text(size = 13), axis.text.x = element_text(size = 10))
+  ),
+  sort_sets = FALSE,
+  queries = query_list,
+  sort_intersections_by = 'ratio'
+) + theme(text = element_text(size = 13), axis.title.x = element_text(size = 13))
+
+# Save the plot
+ggsave(file.path(final_out_dir, "Upset_Method_All.png"), plot = upset_plot_method, width = 10, height = 6, bg = 'white')
+
+# Show the plot
+print(upset_plot_method)
+
+```
+
+# GO Terms
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+#BiocManager::install("clusterProfiler")
+#BiocManager::install("org.Rn.eg.db")  # Rat gene database
+
+library(dplyr)
+library(clusterProfiler)
+library(org.Rn.eg.db)
+
+
+# Step 1: Split by method
+list_of_dataframes <- split(dataset_filtered_in_3_of_4, dataset_filtered_in_3_of_4$Method)
+
+# Step 2: Find all IDs and their method counts
+id_method_counts <- dataset_filtered_in_3_of_4[, .(Method, ID)] %>% distinct()
+id_counts <- as.data.frame(table(id_method_counts$ID))
+
+# Keep only IDs that appear in ONE method
+exclusive_ids <- id_counts$Var1[id_counts$Freq == 1] # change if you want to include all 
+
+# Step 3: Function to extract exclusive genes per method
+process_exclusive_genes <- function(df, method_name) {
+  df_exclusive <- df[df$ID %in% exclusive_ids, ]
+  genes_split <- strsplit(as.character(df_exclusive$Genes), ";")
+  unique_genes <- unique(unlist(genes_split))
+  return(unique_genes)
+}
+
+# Step 4: Apply to each method's dataframe
+list_of_gene_vectors <- mapply(
+  FUN = process_exclusive_genes,
+  df = list_of_dataframes,
+  method_name = names(list_of_dataframes),
+  SIMPLIFY = FALSE
+)
+
+# Step 5: For each method, extract exclusive protein metadata
+exclusive_protein_info <- lapply(names(list_of_dataframes), function(method_name) {
+  df <- list_of_dataframes[[method_name]]
+  df_exclusive <- df[df$ID %in% exclusive_ids, ]
+  df_selected <- df_exclusive[, c("ID", "Protein.Group", "Protein.Ids", "Protein.Names", "Genes")] %>% distinct()
+  return(df_selected)
+})
+
+# Name the list for sheet names
+names(exclusive_protein_info) <- names(list_of_dataframes)
+
+# Step 6: Save to Excel
+writexl::write_xlsx(exclusive_protein_info, path = file.path(final_out_dir, "Exclusive_Proteins_Per_Method.xlsx"))
+
+```
+
+
+## Enrichment
+
+### BP
+
+```{r}
+# Set up enrichment analysis parameters
+keytype <- "SYMBOL"  # Assuming gene symbols are used
+universe <- keys(org.Rn.eg.db, keytype)
+
+# Function to perform GO analysis
+run_go_enrichment <- function(genes) {
+  # Create an enriched GO object
+  ego <- enrichGO(gene          = genes,
+                  universe      = universe,
+                  OrgDb         = org.Rn.eg.db,
+                  keyType       = keytype,
+                  ont           = "BP",  # Biological Process
+                  pAdjustMethod = "BH",
+                  qvalueCutoff  = 1)
+  return(ego)
+}
+
+# Apply GO enrichment to each gene vector
+results_go_enrichment <- lapply(list_of_gene_vectors, run_go_enrichment)
+
+# Apply GO enrichment to each gene vector
+#random_results_go_enrichment <- lapply(random_list_of_gene_vectors, run_go_enrichment)
+```
+
+```{r}
+# Function to filter existing enrichment results
+filter_go_results <- function(enrich_result) {
+  # Check if the object has results and filter
+  df <- data.frame(enrich_result@result)
+  if (length(df) > 0) {  # Ensure there are results to filter
+    filtered_results <- df[df$p.adjust < 0.05, ]
+  #  filtered_results <- df[df$pvalue < 0.05, ]
+    return(filtered_results)
+  } else {
+    return(data.frame())  # Return an empty data.frame if no results
+  }
+}
+
+# Apply the filtering function to each set of enrichment results
+filtered_results_go_enrichment <- lapply(results_go_enrichment, filter_go_results)
+
+```
+
+#### Save data
+
+```{r}
+# Convert to list of data frames with names
+all_enrich_named <- setNames(
+  lapply(results_go_enrichment, function(x) as.data.frame(x@result)),
+  names(results_go_enrichment)
+)
+
+# Save to Excel
+writexl::write_xlsx(all_enrich_named, path = file.path(final_out_dir, "BP_GO_All_Enrichment_Results.xlsx"))
+
+filtered_enrich_named <- setNames(
+  filtered_results_go_enrichment,
+  names(filtered_results_go_enrichment)
+)
+
+# Save to Excel
+writexl::write_xlsx(filtered_enrich_named, path = file.path(final_out_dir, "BP_GO_Filtered_Enrichment_Results.xlsx"))
+
+
+```
+
+
+
+#### Visualization
+
+```{r}
+# Function to extract GO term IDs from results
+extract_go_ids <- function(df) {
+  if (nrow(df) > 0) {  # Check if dataframe is not empty
+    return(df$ID)
+  } else {
+    return(character(0))  # Return empty character vector if no GO terms
+  }
+}
+
+# Extract GO term IDs from each filtered result
+list_of_go_ids <- lapply(filtered_results_go_enrichment, extract_go_ids)
+
+# Assuming list_of_go_ids is available and named per method or condition
+names(list_of_go_ids) <- names(filtered_results_go_enrichment)  # Ensure names are properly assigned
+
+# Combine all GO term IDs into a single dataframe
+all_go_ids <- unique(unlist(list_of_go_ids))
+binary_matrix <- sapply(list_of_go_ids, function(ids) as.integer(all_go_ids %in% ids))
+
+# Convert to dataframe for UpSetR
+binary_df <- data.frame(binary_matrix, row.names = all_go_ids)
+
+names(binary_df) <- rev(names(filtered_results_go_enrichment))
+```
+
+```{r}
+upset_plot <-ComplexUpset::upset(data=binary_df, 
+                    intersect=names(binary_df), name="Extraction Methods", 
+                     wrap=TRUE,
+                    base_annotations=list(
+                        'Intersection size'=intersection_size(
+                            text=list(
+                                size = 2.5
+                            )
+                        )
+                    ),
+                    set_sizes=(
+                        upset_set_size()
+                        + geom_text(aes(label=..count..), hjust=1.1, stat='count')
+                        + annotate(geom='text', label='@', x='Count', y=850, color='white', size=3)
+                        + expand_limits(y=7000)
+                    ),
+                    sort_sets=FALSE,
+                    queries=list(
+                        upset_query(intersect = c("1step"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("1step+C"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("2step"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("2step+M"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("4step"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size'))
+                    ),
+                    sort_intersections_by='cardinality') + ggtitle('Intersection of Biological Processes (BP) GO Terms in Extraction Methods')
+
+# Save the plot
+ggsave(
+  filename = file.path(final_out_dir, "Comparison_of_BP_GO_Terms_per_Method.png"),
+  plot = upset_plot,
+  width = 10, 
+  height = 6, 
+  bg = 'white'
+)
+
+# Print the plot to the console
+print(upset_plot)
+```
+
+#### Top 10
+
+```{r}
+all_ids <- lapply(filtered_results_go_enrichment, function(df) df$ID)
+
+top10_exclusive_results <- list()
+
+for (name in names(filtered_results_go_enrichment)) {
+  this_df <- filtered_results_go_enrichment[[name]]
+  this_ids <- this_df$ID
+  other_ids <- unique(unlist(all_ids[names(all_ids) != name]))
+  
+  exclusive_df <- this_df[this_df$ID %in% setdiff(this_ids, other_ids), ]
+  top10 <- exclusive_df %>% arrange(p.adjust) %>% head(10)
+  
+  top10_exclusive_results[[name]] <- top10
+}
+
+writexl::write_xlsx(top10_exclusive_results, path = file.path(final_out_dir, "BP_GO_Filtered_Top10_Exclusive_Results.xlsx"))
+```
+
+### CC
+
+```{r}
+# Set up enrichment analysis parameters
+keytype <- "SYMBOL"  # Assuming gene symbols are used
+universe <- keys(org.Rn.eg.db, keytype)
+
+# Function to perform GO analysis
+run_go_enrichment <- function(genes) {
+  # Create an enriched GO object
+  ego <- enrichGO(gene          = genes,
+                  universe      = universe,
+                  OrgDb         = org.Rn.eg.db,
+                  keyType       = keytype,
+                  ont           = "CC",  # Cellular Component
+                  pAdjustMethod = "BH",
+                  qvalueCutoff  = 1)
+  return(ego)
+}
+
+# Apply GO enrichment to each gene vector
+results_go_enrichment <- lapply(list_of_gene_vectors, run_go_enrichment)
+
+# Apply GO enrichment to each gene vector
+#random_results_go_enrichment <- lapply(random_list_of_gene_vectors, run_go_enrichment)
+```
+
+```{r}
+# Function to filter existing enrichment results
+filter_go_results <- function(enrich_result) {
+  # Check if the object has results and filter
+  df <- data.frame(enrich_result@result)
+  if (length(df) > 0) {  # Ensure there are results to filter
+    filtered_results <- df[df$p.adjust < 0.05, ]
+  #  filtered_results <- df[df$pvalue < 0.05, ]
+    return(filtered_results)
+  } else {
+    return(data.frame())  # Return an empty data.frame if no results
+  }
+}
+
+# Apply the filtering function to each set of enrichment results
+filtered_results_go_enrichment <- lapply(results_go_enrichment, filter_go_results)
+
+```
+
+#### Save data
+
+```{r}
+# Convert to list of data frames with names
+all_enrich_named <- setNames(
+  lapply(results_go_enrichment, function(x) as.data.frame(x@result)),
+  names(results_go_enrichment)
+)
+
+# Save to Excel
+writexl::write_xlsx(all_enrich_named, path = file.path(final_out_dir, "CC_GO_All_Enrichment_Results.xlsx"))
+
+filtered_enrich_named <- setNames(
+  filtered_results_go_enrichment,
+  names(filtered_results_go_enrichment)
+)
+
+# Save to Excel
+writexl::write_xlsx(filtered_enrich_named, path = file.path(final_out_dir, "CC_GO_Filtered_Enrichment_Results.xlsx"))
+
+
+```
+
+
+
+#### Visualization
+
+```{r}
+# Function to extract GO term IDs from results
+extract_go_ids <- function(df) {
+  if (nrow(df) > 0) {  # Check if dataframe is not empty
+    return(df$ID)
+  } else {
+    return(character(0))  # Return empty character vector if no GO terms
+  }
+}
+
+# Extract GO term IDs from each filtered result
+list_of_go_ids <- lapply(filtered_results_go_enrichment, extract_go_ids)
+
+# Assuming list_of_go_ids is available and named per method or condition
+names(list_of_go_ids) <- names(filtered_results_go_enrichment)  # Ensure names are properly assigned
+
+# Combine all GO term IDs into a single dataframe
+all_go_ids <- unique(unlist(list_of_go_ids))
+binary_matrix <- sapply(list_of_go_ids, function(ids) as.integer(all_go_ids %in% ids))
+
+# Convert to dataframe for UpSetR
+binary_df <- data.frame(binary_matrix, row.names = all_go_ids)
+
+names(binary_df) <- rev(names(filtered_results_go_enrichment))
+```
+
+```{r}
+upset_plot <-ComplexUpset::upset(data=binary_df, 
+                    intersect=names(binary_df), name="Extraction Methods", 
+                     wrap=TRUE,
+                    base_annotations=list(
+                        'Intersection size'=intersection_size(
+                            text=list(
+                                size = 2.5
+                            )
+                        )
+                    ),
+                    set_sizes=(
+                        upset_set_size()
+                        + geom_text(aes(label=..count..), hjust=1.1, stat='count')
+                        + annotate(geom='text', label='@', x='Count', y=850, color='white', size=3)
+                        + expand_limits(y=7000)
+                    ),
+                    sort_sets=FALSE,
+                    queries=list(
+                        upset_query(intersect = c("1step"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("1step+C"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("2step"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("2step+M"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("4step"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size'))
+                    ),
+                    sort_intersections_by='cardinality') + ggtitle('Intersection of Cellular Component (CC) GO Terms in Extraction Methods')
+
+# Save the plot
+ggsave(
+  filename = file.path(final_out_dir, "Comparison_of_CC_GO_Terms_per_Method.png"),
+  plot = upset_plot,
+  width = 10, 
+  height = 6, 
+  bg = 'white'
+)
+
+# Print the plot to the console
+print(upset_plot)
+```
+
+#### Top 10
+
+```{r}
+all_ids <- lapply(filtered_results_go_enrichment, function(df) df$ID)
+
+top10_exclusive_results <- list()
+
+for (name in names(filtered_results_go_enrichment)) {
+  this_df <- filtered_results_go_enrichment[[name]]
+  this_ids <- this_df$ID
+  other_ids <- unique(unlist(all_ids[names(all_ids) != name]))
+  
+  exclusive_df <- this_df[this_df$ID %in% setdiff(this_ids, other_ids), ]
+  top10 <- exclusive_df %>% arrange(p.adjust) %>% head(10)
+  
+  top10_exclusive_results[[name]] <- top10
+}
+
+writexl::write_xlsx(top10_exclusive_results, path = file.path(final_out_dir, "CC_GO_Filtered_Top10_Exclusive_Results.xlsx"))
+```
+
+
+### MF
+
+```{r}
+# Set up enrichment analysis parameters
+keytype <- "SYMBOL"  # Assuming gene symbols are used
+universe <- keys(org.Rn.eg.db, keytype)
+
+# Function to perform GO analysis
+run_go_enrichment <- function(genes) {
+  # Create an enriched GO object
+  ego <- enrichGO(gene          = genes,
+                  universe      = universe,
+                  OrgDb         = org.Rn.eg.db,
+                  keyType       = keytype,
+                  ont           = "MF",  # Molecular Function
+                  pAdjustMethod = "BH",
+                  qvalueCutoff  = 1)
+  return(ego)
+}
+
+# Apply GO enrichment to each gene vector
+results_go_enrichment <- lapply(list_of_gene_vectors, run_go_enrichment)
+
+# Apply GO enrichment to each gene vector
+#random_results_go_enrichment <- lapply(random_list_of_gene_vectors, run_go_enrichment)
+```
+
+```{r}
+# Function to filter existing enrichment results
+filter_go_results <- function(enrich_result) {
+  # Check if the object has results and filter
+  df <- data.frame(enrich_result@result)
+  if (length(df) > 0) {  # Ensure there are results to filter
+    filtered_results <- df[df$p.adjust < 0.05, ]
+  #  filtered_results <- df[df$pvalue < 0.05, ]
+    return(filtered_results)
+  } else {
+    return(data.frame())  # Return an empty data.frame if no results
+  }
+}
+
+# Apply the filtering function to each set of enrichment results
+filtered_results_go_enrichment <- lapply(results_go_enrichment, filter_go_results)
+
+```
+
+#### Save data
+
+```{r}
+# Convert to list of data frames with names
+all_enrich_named <- setNames(
+  lapply(results_go_enrichment, function(x) as.data.frame(x@result)),
+  names(results_go_enrichment)
+)
+
+# Save to Excel
+writexl::write_xlsx(all_enrich_named, path = file.path(final_out_dir, "MF_GO_All_Enrichment_Results.xlsx"))
+
+filtered_enrich_named <- setNames(
+  filtered_results_go_enrichment,
+  names(filtered_results_go_enrichment)
+)
+
+# Save to Excel
+writexl::write_xlsx(filtered_enrich_named, path = file.path(final_out_dir, "MF_GO_Filtered_Enrichment_Results.xlsx"))
+
+
+```
+
+
+
+#### Visualization
+
+```{r}
+# Function to extract GO term IDs from results
+extract_go_ids <- function(df) {
+  if (nrow(df) > 0) {  # Check if dataframe is not empty
+    return(df$ID)
+  } else {
+    return(character(0))  # Return empty character vector if no GO terms
+  }
+}
+
+# Extract GO term IDs from each filtered result
+list_of_go_ids <- lapply(filtered_results_go_enrichment, extract_go_ids)
+
+# Assuming list_of_go_ids is available and named per method or condition
+names(list_of_go_ids) <- names(filtered_results_go_enrichment)  # Ensure names are properly assigned
+
+# Combine all GO term IDs into a single dataframe
+all_go_ids <- unique(unlist(list_of_go_ids))
+binary_matrix <- sapply(list_of_go_ids, function(ids) as.integer(all_go_ids %in% ids))
+
+# Convert to dataframe for UpSetR
+binary_df <- data.frame(binary_matrix, row.names = all_go_ids)
+
+names(binary_df) <- rev(names(filtered_results_go_enrichment))
+```
+
+```{r}
+upset_plot <-ComplexUpset::upset(data=binary_df, 
+                    intersect=names(binary_df), name="Extraction Methods", 
+                     wrap=TRUE,
+                    base_annotations=list(
+                        'Intersection size'=intersection_size(
+                            text=list(
+                                size = 2.5
+                            )
+                        )
+                    ),
+                    set_sizes=(
+                        upset_set_size()
+                        + geom_text(aes(label=..count..), hjust=1.1, stat='count')
+                        + annotate(geom='text', label='@', x='Count', y=850, color='white', size=3)
+                        + expand_limits(y=7000)
+                    ),
+                    sort_sets=FALSE,
+                    queries=list(
+                        upset_query(intersect = c("1step"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("1step+C"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("2step"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("2step+M"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size')),
+                        upset_query(intersect = c("4step"), color = "orchid", fill='orchid', only_components=c('intersections_matrix', 'Intersection size'))
+                    ),
+                    sort_intersections_by='cardinality') + ggtitle('Intersection of Molecular Function (MF) GO Terms in Extraction Methods')
+
+# Save the plot
+ggsave(
+  filename = file.path(final_out_dir, "Comparison_of_MF_GO_Terms_per_Method.png"),
+  plot = upset_plot,
+  width = 10, 
+  height = 6, 
+  bg = 'white'
+)
+
+# Print the plot to the console
+print(upset_plot)
+```
+
+#### Top 10
+
+```{r}
+all_ids <- lapply(filtered_results_go_enrichment, function(df) df$ID)
+
+top10_exclusive_results <- list()
+
+for (name in names(filtered_results_go_enrichment)) {
+  this_df <- filtered_results_go_enrichment[[name]]
+  this_ids <- this_df$ID
+  other_ids <- unique(unlist(all_ids[names(all_ids) != name]))
+  
+  exclusive_df <- this_df[this_df$ID %in% setdiff(this_ids, other_ids), ]
+  top10 <- exclusive_df %>% arrange(p.adjust) %>% head(10)
+  
+  top10_exclusive_results[[name]] <- top10
+}
+
+writexl::write_xlsx(top10_exclusive_results, path = file.path(final_out_dir, "MF_GO_Filtered_Top10_Exclusive_Results.xlsx"))
 ```
